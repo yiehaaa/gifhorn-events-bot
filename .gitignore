@@ -1,0 +1,13 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+token.json
+client_secret.json
+bot.log
+*.log
+*.sqlite3
+.DS_Store
