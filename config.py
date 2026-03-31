@@ -8,9 +8,12 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv()
+# .env relativ zum config.py-Verzeichnis laden – funktioniert unabhängig vom CWD
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 # ==================== MODE ====================
 # Wenn `MOCK_MODE=1` ist gesetzt, laufen wir ohne externe API-Keys durch
@@ -63,16 +66,20 @@ DEDUP_MIN_CHARS = 50  # Minimale Event-Beschreibung
 
 # Claude
 CLAUDE_POST_TEMPLATE = """Du bist ein Event-Manager für Gifhorn und Umgebung.
-Schreibe einen Instagram-Post für folgendes Event:
+Schreibe einen Instagram-Post für folgendes Event (gleicher Text für Instagram und Facebook):
 
 {event_details}
 
+Hashtag-Basis (verwende diese Tags als Ausgangspunkt):
+{hashtags}
+
 Anforderungen:
-- 200–500 Zeichen
+- 200–500 Zeichen (ohne harte Grenzen, aber kürzen wenn nötig)
 - Lockerer, freundlicher Ton
-- Hashtags am Ende (#gifhorn #veranstaltung etc.)
 - Keine Werbung, nur Info
 - Uhrzeit & Ort prominent
+- Hashtags: Füge am ENDE als letzte Zeile exakt eine Hashtag-Zeile ein.
+  Nutze hauptsächlich die Hashtag-Basis; ergänze höchstens 1–3 weitere passende Tags.
 """
 
 # Telegram
