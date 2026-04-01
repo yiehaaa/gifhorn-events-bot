@@ -855,6 +855,58 @@ class Database:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_email_sender_whitelist_patterns(self) -> List[str]:
+        """Alle gespeicherten Sender-Regex-Patterns (zusätzlich zu EMAIL_SENDER_PATTERNS in .env)."""
+        self._ensure_conn()
+        if self.mode == "pg":
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT email_pattern FROM email_sender_whitelist ORDER BY id ASC"
+                )
+                return [r[0] for r in cur.fetchall()]
+        rows = self.conn.execute(
+            "SELECT email_pattern FROM email_sender_whitelist ORDER BY id ASC"
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def upsert_email_sender_whitelist(
+        self,
+        email_pattern: str,
+        organization_name: Optional[str] = None,
+        score_boost: float = 1.0,
+    ) -> None:
+        """Pattern idempotent einfügen oder Metadaten aktualisieren."""
+        self._ensure_conn()
+        pat = (email_pattern or "").strip()
+        if not pat:
+            return
+        org = (organization_name or "").strip() or None
+        if self.mode == "pg":
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO email_sender_whitelist (email_pattern, organization_name, score_boost)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (email_pattern) DO UPDATE SET
+                        organization_name = EXCLUDED.organization_name,
+                        score_boost = EXCLUDED.score_boost
+                    """,
+                    (pat, org, score_boost),
+                )
+            self.conn.commit()
+        else:
+            with self.conn:
+                self.conn.execute(
+                    """
+                    INSERT INTO email_sender_whitelist (email_pattern, organization_name, score_boost)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(email_pattern) DO UPDATE SET
+                        organization_name = excluded.organization_name,
+                        score_boost = excluded.score_boost
+                    """,
+                    (pat, org or "", score_boost),
+                )
+
     def get_email_submission_by_id(self, submission_id: int) -> Optional[Dict[str, Any]]:
         self._ensure_conn()
         if self.mode == "pg":

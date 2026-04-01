@@ -24,6 +24,10 @@ Siehe `railway-dashboard.json`.
 - `SCRAPERS_ENABLED=0`
 - `DASHBOARD_USER` (optional, default `admin`)
 - `DASHBOARD_PASSWORD` = langes Passwort
+- **Email-Flyer (empfohlen, wenn Gmail + Anhänge):**
+  - Im Railway-Dashboard-Service: **Volume** anlegen, Mount-Pfad **`/app/email_attachments`**
+  - `EMAIL_ATTACHMENT_STORAGE_PATH=/app/email_attachments` (entspricht dem Default in `config.py`)
+  - `PUBLIC_IMAGE_BASE_URL=https://<dein-dashboard-host>/flyers` damit Meta öffentliche Bild-URLs bekommt
 
 ### Zugriffsweg
 Öffne die Railway URL → Basic-Auth (User/Passwort) → Formular „Event einreichen“.

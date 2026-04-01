@@ -17,7 +17,12 @@ from claude_handler import claude_handler
 from config import (
     AUTO_APPROVE_SOCIAL_FOR_EMAIL_SUBMISSIONS,
     AUTO_POST_AFTER_EMAIL_CONVERSION,
+    EMAIL_KEYWORDS,
+    EMAIL_MAX_ATTACHMENT_SIZE,
+    EMAIL_MIN_ATTACHMENT_SIZE,
+    EMAIL_REQUIRE_ATTACHMENTS,
     EMAIL_SCREENING_ENABLED,
+    EMAIL_SENDER_PATTERNS,
     GOOGLE_CREDENTIALS_FILE,
     MOCK_MODE,
     SCRAPERS_ENABLED,
@@ -30,6 +35,7 @@ from email_handler import email_handler
 from meta_poster import meta_poster
 from scrapers import collect_all_events
 from gcal_sync import gcal_sync
+from scrapers.email_screener import EmailScreener
 from telegram_bot import telegram_bot
 
 logging.basicConfig(
@@ -61,8 +67,17 @@ async def collect_and_approve_flow() -> None:
                 logger.info(f"📧 {len(pending_emails)} unverarbeitete Emails gefunden")
 
                 if pending_emails and email_screener:
-                    # 2. Filtere & score die Emails
-                    screened_emails = email_screener.filter_submissions(pending_emails)
+                    # 2. .env-Patterns + DB-Whitelist (email_sender_whitelist) zusammenführen
+                    db_patterns = db.get_email_sender_whitelist_patterns()
+                    merged = list(dict.fromkeys(EMAIL_SENDER_PATTERNS + db_patterns))
+                    active_screener = EmailScreener(
+                        sender_patterns=merged,
+                        keywords=EMAIL_KEYWORDS,
+                        require_attachments=EMAIL_REQUIRE_ATTACHMENTS,
+                        min_attachment_size=EMAIL_MIN_ATTACHMENT_SIZE,
+                        max_attachment_size=EMAIL_MAX_ATTACHMENT_SIZE,
+                    )
+                    screened_emails = active_screener.filter_submissions(pending_emails)
                     logger.info(f"📧 Nach Screening: {len(screened_emails)} relevante Emails")
 
                     if screened_emails:
