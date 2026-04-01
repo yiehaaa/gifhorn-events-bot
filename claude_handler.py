@@ -13,7 +13,13 @@ from typing import Any, Dict, List, Tuple
 import anthropic
 import requests
 
-from config import CLAUDE_API_KEY, CLAUDE_MODEL, CLAUDE_POST_TEMPLATE, MOCK_MODE, INSTAGRAM_HASHTAGS, FACEBOOK_HASHTAGS
+from config import (
+    CLAUDE_API_KEY,
+    CLAUDE_MODEL,
+    CLAUDE_POST_TEMPLATE,
+    MOCK_MODE,
+    INSTAGRAM_HASHTAGS,
+)
 from weather import weather_handler
 
 logger = logging.getLogger(__name__)
@@ -98,7 +104,8 @@ class ClaudeHandler:
                     {
                         "role": "user",
                         "content": CLAUDE_POST_TEMPLATE.format(
-                            event_details=event_details
+                            event_details=event_details,
+                            hashtags=INSTAGRAM_HASHTAGS,
                         ),
                     }
                 ],
@@ -171,6 +178,76 @@ class ClaudeHandler:
         except Exception as e:
             logger.error("Vision-Check-Fehler: %s", e)
             return (True, "Fehler, aber erlaubt (Fallback)")
+
+    def generate_caption_from_email(
+        self, body_text: str, subject: str = "", image_path: str | None = None
+    ) -> str:
+        """
+        Schreibt eine Instagram/Facebook Caption für einen Email-Flyer.
+        Das Bild wird 1:1 als Post genutzt — Claude schreibt nur die Caption.
+
+        Returns: Fertiger Caption-Text mit Hashtags
+        """
+        fallback = (
+            f"📢 {subject or 'Neues Event'}\n\n"
+            f"{body_text[:300] if body_text else ''}\n\n"
+            f"{INSTAGRAM_HASHTAGS}"
+        )
+
+        if self.client is None or MOCK_MODE:
+            return fallback
+
+        content = []
+
+        # Plakat-Bild mitschicken falls vorhanden (Claude liest Datum/Ort vom Bild)
+        if image_path:
+            try:
+                with open(image_path, "rb") as f:
+                    image_data = base64.standard_b64encode(f.read()).decode("utf-8")
+                media_type, _ = mimetypes.guess_type(image_path)
+                if media_type not in ("image/jpeg", "image/png", "image/webp", "image/gif"):
+                    media_type = "image/jpeg"
+                content.append({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": media_type, "data": image_data},
+                })
+            except Exception as e:
+                logger.warning("Bild konnte nicht geladen werden: %s", e)
+
+        content.append({
+            "type": "text",
+            "text": f"""Du bist Social-Media-Manager für den Veranstaltungskanal Gifhorn & Umgebung.
+
+Wichtig: Es gibt genau EIN Bild — der Flyer/ das Plakat aus der Email. Dieses Bild wird
+1:1 als einziger Post auf Instagram/Facebook veröffentlicht. Du lieferst NUR den Begleittext
+(Caption). Keine Vorschläge für weitere Bilder, Collagen oder KI-generierte Grafiken.
+
+Schreibe die Instagram/Facebook-Caption für diesen Flyer.
+
+Email-Betreff: {subject or '(kein Betreff)'}
+Email-Inhalt: {body_text or '(kein Text)'}
+
+Anforderungen:
+- 150–400 Zeichen
+- Lockerer, einladender Ton
+- Datum, Uhrzeit und Ort prominent (aus Bild oder Email entnehmen)
+- Hashtags am Ende: {INSTAGRAM_HASHTAGS}
+- Nur die Caption, kein Kommentar drumherum"""
+        })
+
+        try:
+            message = self.client.messages.create(
+                model=self.model,
+                max_tokens=512,
+                messages=[{"role": "user", "content": content}],
+            )
+            caption = _first_text_block(message).strip()
+            if caption:
+                return caption
+        except Exception as e:
+            logger.error("Claude Caption-Fehler: %s", e)
+
+        return fallback
 
     def batch_generate_posts(self, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Generiert post_text pro Event; optional Bild-Check."""

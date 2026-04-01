@@ -6,9 +6,8 @@ Lädt .env und validiert Pflicht-Keys beim Import (siehe 01a-CONFIG).
 from __future__ import annotations
 
 import os
-from typing import Optional
-
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -53,11 +52,49 @@ GOOGLE_CREDENTIALS_FILE: str = os.getenv("GOOGLE_CREDENTIALS_FILE", "client_secr
 GOOGLE_TOKEN_FILE: str = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
 GMAIL_ADDRESS: Optional[str] = os.getenv("GMAIL_ADDRESS")  # Bot's Gmail Adresse
 
+# ==================== EMAIL SCREENING ====================
+EMAIL_SCREENING_ENABLED: bool = os.getenv("EMAIL_SCREENING_ENABLED", "1").strip() == "1"
+EMAIL_ATTACHMENT_STORAGE_PATH: str = os.getenv(
+    "EMAIL_ATTACHMENT_STORAGE_PATH", "/app/email_attachments"
+)
+# Sender-Whitelist (Regex-Patterns, kommagerennt)
+EMAIL_SENDER_PATTERNS: list[str] = [
+    p.strip() for p in (os.getenv("EMAIL_SENDER_PATTERNS", ".*@example.com") or "").split(",")
+    if p.strip()
+]
+# Keywords für Email-Screening (kommagerennt)
+EMAIL_KEYWORDS: list[str] = [
+    k.strip() for k in (
+        os.getenv("EMAIL_KEYWORDS", "event,plakat,anmeldung,veranstaltung,ankündigung")
+        or ""
+    ).split(",")
+    if k.strip()
+]
+EMAIL_REQUIRE_ATTACHMENTS: bool = os.getenv("EMAIL_REQUIRE_ATTACHMENTS", "1").strip() == "1"
+EMAIL_MIN_ATTACHMENT_SIZE: int = int(os.getenv("EMAIL_MIN_ATTACHMENT_SIZE", "50000"))  # Bytes
+EMAIL_MAX_ATTACHMENT_SIZE: int = int(os.getenv("EMAIL_MAX_ATTACHMENT_SIZE", "10000000"))  # 10MB
+
+# Nach freigegebener Email: Event sofort für Meta markieren (keine 2. Telegram-Runde)
+AUTO_APPROVE_SOCIAL_FOR_EMAIL_SUBMISSIONS: bool = (
+    os.getenv("AUTO_APPROVE_SOCIAL_FOR_EMAIL_SUBMISSIONS", "0").strip() == "1"
+)
+# Direkt nach Email→Event auf Instagram/Facebook posten (impliziert Social-Freigabe)
+AUTO_POST_AFTER_EMAIL_CONVERSION: bool = (
+    os.getenv("AUTO_POST_AFTER_EMAIL_CONVERSION", "0").strip() == "1"
+)
+# Öffentliche Basis-URL der Flyer (Dashboard muss /flyers bereitstellen), z. B.
+# https://dein-service.railway.app/flyers — für Meta image_url bei lokalem Speicherpfad
+PUBLIC_IMAGE_BASE_URL: Optional[str] = os.getenv("PUBLIC_IMAGE_BASE_URL") or None
+
 # ==================== GLOBALE KONSTANTEN ====================
 
-# Posting-Zeiten
-CRON_COLLECT_TIME = "19:00"  # Tägliche Sammlung
-POSTING_TIME = "20:00"  # Wann wird gepostet?
+# Posting-Zeiten (Empfehlung Europe/Berlin — Uhrzeiten im Railway-Cron eintragen)
+# ~19:00  worker.py --collect   → Mail-Digest: Spam pro Mail ❌, dann „Alle übrigen freigeben“
+# ~21:00  worker.py --evening-preview → KI-Beiträge zur Freigabe
+# danach  worker.py --post       → Meta (wenn du die Beiträge freigegeben hast)
+CRON_COLLECT_TIME = "19:00"  # = Mail-Abruf + Digest (deine Bestätigung)
+CRON_EVENING_PREVIEW_TIME = "21:00"
+POSTING_TIME = "22:00"  # Meta-Posting nach Freigabe der Abend-Vorschau
 POSTING_TIMEZONE = "Europe/Berlin"
 
 # Deduplizierung
@@ -119,3 +156,34 @@ STADTHALLE_PROGRAM_URL: str = os.getenv(
 
 # Externe Scraper standardmäßig deaktivieren (damit Tests ohne APIs funktionieren).
 SCRAPERS_ENABLED: bool = os.getenv("SCRAPERS_ENABLED", "0").strip() == "1"
+
+# ==================== EMAIL SCREENER INITIALISIERUNG ====================
+# (wird am Ende importiert um Circular Import zu vermeiden)
+try:
+    from scrapers.email_screener import EmailScreener
+    email_screener = EmailScreener(
+        sender_patterns=EMAIL_SENDER_PATTERNS,
+        keywords=EMAIL_KEYWORDS,
+        require_attachments=EMAIL_REQUIRE_ATTACHMENTS,
+        min_attachment_size=EMAIL_MIN_ATTACHMENT_SIZE,
+        max_attachment_size=EMAIL_MAX_ATTACHMENT_SIZE,
+    ) if EMAIL_SCREENING_ENABLED else None
+except ImportError:
+    email_screener = None  # Bei Import-Fehler: deaktiviert
+
+
+def public_image_url(stored: str) -> str:
+    """
+    Wandelt einen lokalen Anhang-Pfad in eine öffentliche URL um, wenn
+    PUBLIC_IMAGE_BASE_URL gesetzt ist (sonst unverändert — Meta braucht https).
+    """
+    if not stored:
+        return ""
+    s = stored.strip()
+    if s.startswith(("http://", "https://")):
+        return s
+    base = (PUBLIC_IMAGE_BASE_URL or "").rstrip("/")
+    if not base:
+        return s
+    name = Path(s).name
+    return f"{base}/{name}"

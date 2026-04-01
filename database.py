@@ -9,8 +9,9 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Union
+from zoneinfo import ZoneInfo
 
 import psycopg2
 from psycopg2 import IntegrityError
@@ -19,6 +20,32 @@ from psycopg2.extras import Json, RealDictCursor
 from config import DATABASE_URL, SQLITE_PATH
 
 logger = logging.getLogger(__name__)
+
+_BERLIN = ZoneInfo("Europe/Berlin")
+
+
+def _created_at_to_berlin_date(val: Any) -> date:
+    """created_at aus DB → Datum in Europe/Berlin (naive Zeit = UTC)."""
+    if val is None:
+        return date.min
+    if isinstance(val, datetime):
+        dt = val
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        return dt.astimezone(_BERLIN).date()
+    if isinstance(val, str):
+        try:
+            raw = val.replace("Z", "+00:00")
+            if "T" in raw:
+                dt = datetime.fromisoformat(raw[:26])
+            else:
+                dt = datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+            return dt.astimezone(_BERLIN).date()
+        except (ValueError, TypeError):
+            pass
+    return date.min
 
 
 class Database:
@@ -137,6 +164,61 @@ class Database:
                     """
                 )
 
+                # Email Submission Tables (neu)
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS email_sender_whitelist (
+                      id SERIAL PRIMARY KEY,
+                      email_pattern VARCHAR(255) NOT NULL UNIQUE,
+                      organization_name VARCHAR(255),
+                      score_boost FLOAT DEFAULT 1.0,
+                      created_at TIMESTAMP DEFAULT NOW()
+                    )
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS email_submissions (
+                      id SERIAL PRIMARY KEY,
+                      gmail_message_id VARCHAR(255) UNIQUE NOT NULL,
+                      sender_email VARCHAR(255) NOT NULL,
+                      sender_name VARCHAR(255),
+                      subject VARCHAR(500) NOT NULL,
+                      body_text TEXT,
+                      attachment_urls JSONB,
+                      screening_score FLOAT,
+                      matched_filters JSONB,
+                      approval_status VARCHAR(50) DEFAULT 'pending',
+                      approved_by VARCHAR(255),
+                      approved_at TIMESTAMP,
+                      approved_post_text TEXT,
+                      converted_to_event_id INT REFERENCES events(id),
+                      created_at TIMESTAMP DEFAULT NOW(),
+                      updated_at TIMESTAMP DEFAULT NOW()
+                    )
+                    """
+                )
+
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_email_submissions_status ON email_submissions(approval_status)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_email_submissions_sender ON email_submissions(sender_email)"
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE email_submissions
+                    ADD COLUMN IF NOT EXISTS ingest_batch_id VARCHAR(32)
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE events
+                    ADD COLUMN IF NOT EXISTS evening_preview_sent BOOLEAN DEFAULT FALSE
+                    """
+                )
+
             self.conn.commit()
             logger.info("Tabellen erstellt/überprüft (Postgres)")
             return
@@ -200,6 +282,47 @@ class Database:
                 )
                 """
             )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS email_sender_whitelist (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  email_pattern TEXT UNIQUE NOT NULL,
+                  organization_name TEXT,
+                  score_boost REAL DEFAULT 1.0,
+                  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS email_submissions (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  gmail_message_id TEXT UNIQUE NOT NULL,
+                  sender_email TEXT NOT NULL,
+                  sender_name TEXT,
+                  subject TEXT NOT NULL,
+                  body_text TEXT,
+                  attachment_urls TEXT,
+                  screening_score REAL,
+                  matched_filters TEXT,
+                  approval_status TEXT DEFAULT 'pending',
+                  approved_by TEXT,
+                  approved_at TEXT,
+                  approved_post_text TEXT,
+                  converted_to_event_id INTEGER,
+                  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            for _alter in (
+                "ALTER TABLE email_submissions ADD COLUMN ingest_batch_id TEXT",
+                "ALTER TABLE events ADD COLUMN evening_preview_sent INTEGER DEFAULT 0",
+            ):
+                try:
+                    self.conn.execute(_alter)
+                except sqlite3.OperationalError:
+                    pass
         logger.info("Tabellen erstellt/überprüft (SQLite)")
 
     def add_event(
@@ -631,6 +754,372 @@ class Database:
                 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 (level, message, ctx_sqlite),
+            )
+
+    def add_email_submission(
+        self,
+        gmail_message_id: str,
+        sender_email: str,
+        subject: str,
+        body_text: Optional[str] = None,
+        sender_name: Optional[str] = None,
+        attachment_urls: Optional[Dict[str, str]] = None,
+        screening_score: Optional[float] = None,
+        matched_filters: Optional[Dict[str, Any]] = None,
+        ingest_batch_id: Optional[str] = None,
+    ) -> Optional[int]:
+        """Speichert eine Email-Submission in die DB"""
+        self._ensure_conn()
+
+        if self.mode == "pg":
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO email_submissions
+                        (gmail_message_id, sender_email, sender_name, subject, body_text,
+                         attachment_urls, screening_score, matched_filters, approval_status,
+                         ingest_batch_id, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, NOW())
+                        RETURNING id
+                        """,
+                        (
+                            gmail_message_id,
+                            sender_email,
+                            sender_name,
+                            subject,
+                            body_text,
+                            Json(attachment_urls) if attachment_urls else None,
+                            screening_score,
+                            Json(matched_filters) if matched_filters else None,
+                            ingest_batch_id,
+                        ),
+                    )
+                    row = cur.fetchone()
+                self.conn.commit()
+                return int(row[0]) if row else None
+            except IntegrityError:
+                self.conn.rollback()
+                logger.warning("Email %s bereits in DB", gmail_message_id)
+                return None
+        else:
+            try:
+                with self.conn:
+                    cur = self.conn.execute(
+                        """
+                        INSERT INTO email_submissions
+                        (gmail_message_id, sender_email, sender_name, subject, body_text,
+                         attachment_urls, screening_score, matched_filters, approval_status,
+                         ingest_batch_id, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, CURRENT_TIMESTAMP)
+                        """,
+                        (
+                            gmail_message_id,
+                            sender_email,
+                            sender_name,
+                            subject,
+                            body_text,
+                            json.dumps(attachment_urls) if attachment_urls else None,
+                            screening_score,
+                            json.dumps(matched_filters) if matched_filters else None,
+                            ingest_batch_id,
+                        ),
+                    )
+                    return int(cur.lastrowid)
+            except sqlite3.IntegrityError:
+                logger.warning("Email %s bereits in DB", gmail_message_id)
+                return None
+
+    def get_pending_email_submissions(self) -> List[Dict[str, Any]]:
+        """Hole alle unbearbeiteten Email-Submissions"""
+        self._ensure_conn()
+        if self.mode == "pg":
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM email_submissions
+                    WHERE approval_status = 'pending'
+                    ORDER BY created_at DESC
+                    LIMIT 50
+                    """
+                )
+                return [dict(r) for r in cur.fetchall()]
+
+        rows = self.conn.execute(
+            """
+            SELECT * FROM email_submissions
+            WHERE approval_status = 'pending'
+            ORDER BY created_at DESC
+            LIMIT 50
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_email_submission_by_id(self, submission_id: int) -> Optional[Dict[str, Any]]:
+        self._ensure_conn()
+        if self.mode == "pg":
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM email_submissions WHERE id = %s", (submission_id,)
+                )
+                row = cur.fetchone()
+            return dict(row) if row else None
+
+        row = self.conn.execute(
+            "SELECT * FROM email_submissions WHERE id = ?", (submission_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_approved_emails_pending_conversion(self) -> List[Dict[str, Any]]:
+        """Freigegeben, aber noch kein Event (Claude / Meta-Pipeline)."""
+        self._ensure_conn()
+        if self.mode == "pg":
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM email_submissions
+                    WHERE approval_status = 'approved'
+                      AND converted_to_event_id IS NULL
+                    ORDER BY id ASC
+                    LIMIT 50
+                    """
+                )
+                return [dict(r) for r in cur.fetchall()]
+
+        rows = self.conn.execute(
+            """
+            SELECT * FROM email_submissions
+            WHERE approval_status = 'approved'
+              AND converted_to_event_id IS NULL
+            ORDER BY id ASC
+            LIMIT 50
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_email_approval(
+        self,
+        email_submission_id: int,
+        approved: bool,
+        approved_by: str = "telegram",
+        approved_post_text: Optional[str] = None,
+    ) -> None:
+        """Setzt Genehmigungsstatus für Email-Submission"""
+        self._ensure_conn()
+        status = "approved" if approved else "rejected"
+
+        if self.mode == "pg":
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE email_submissions
+                    SET approval_status = %s,
+                        approved_by = %s,
+                        approved_post_text = %s,
+                        approved_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (status, approved_by, approved_post_text, email_submission_id),
+                )
+            self.conn.commit()
+        else:
+            now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            with self.conn:
+                self.conn.execute(
+                    """
+                    UPDATE email_submissions
+                    SET approval_status = ?,
+                        approved_by = ?,
+                        approved_post_text = ?,
+                        approved_at = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (status, approved_by, approved_post_text, now, now, email_submission_id),
+                )
+
+    def link_email_to_event(self, email_submission_id: int, event_id: int) -> None:
+        """Verknüpft Email-Submission mit erstelltem Event"""
+        self._ensure_conn()
+        if self.mode == "pg":
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE email_submissions
+                    SET converted_to_event_id = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (event_id, email_submission_id),
+                )
+            self.conn.commit()
+        else:
+            now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            with self.conn:
+                self.conn.execute(
+                    """
+                    UPDATE email_submissions
+                    SET converted_to_event_id = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (event_id, now, email_submission_id),
+                )
+
+    def approve_email_submissions_by_batch(
+        self, batch_hex: str, approved_by: str = "telegram"
+    ) -> int:
+        """Alle noch pending Mails dieser Tages-Batch freigeben (ingest_batch_id = 32 hex)."""
+        if not batch_hex or len(batch_hex) != 32:
+            return 0
+        self._ensure_conn()
+        if self.mode == "pg":
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE email_submissions
+                    SET approval_status = 'approved',
+                        approved_by = %s,
+                        approved_at = NOW(),
+                        updated_at = NOW()
+                    WHERE ingest_batch_id = %s AND approval_status = 'pending'
+                    """,
+                    (approved_by, batch_hex),
+                )
+                n = cur.rowcount
+            self.conn.commit()
+            return int(n)
+
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                UPDATE email_submissions
+                SET approval_status = 'approved',
+                    approved_by = ?,
+                    approved_at = ?,
+                    updated_at = ?
+                WHERE ingest_batch_id = ? AND approval_status = 'pending'
+                """,
+                (approved_by, now, now, batch_hex),
+            )
+        return int(cur.rowcount) if cur.rowcount is not None else 0
+
+    def reject_email_submissions_by_batch(
+        self, batch_hex: str, approved_by: str = "telegram"
+    ) -> int:
+        if not batch_hex or len(batch_hex) != 32:
+            return 0
+        self._ensure_conn()
+        if self.mode == "pg":
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE email_submissions
+                    SET approval_status = 'rejected',
+                        approved_by = %s,
+                        approved_at = NOW(),
+                        updated_at = NOW()
+                    WHERE ingest_batch_id = %s AND approval_status = 'pending'
+                    """,
+                    (approved_by, batch_hex),
+                )
+                n = cur.rowcount
+            self.conn.commit()
+            return int(n)
+
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                UPDATE email_submissions
+                SET approval_status = 'rejected',
+                    approved_by = ?,
+                    approved_at = ?,
+                    updated_at = ?
+                WHERE ingest_batch_id = ? AND approval_status = 'pending'
+                """,
+                (approved_by, now, now, batch_hex),
+            )
+        return int(cur.rowcount) if cur.rowcount is not None else 0
+
+    def get_email_derived_events_for_evening_preview(
+        self, berlin_day: date
+    ) -> List[Dict[str, Any]]:
+        """
+        Aus Mails erzeugte Beiträge: warten auf Freigabe, Abend-Übersicht noch nicht gesendet,
+        Erstellungsdatum (created_at) am berlin_day.
+        """
+        self._ensure_conn()
+        if self.mode == "pg":
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM events
+                    WHERE source = 'email_submission'
+                      AND posted_at IS NULL
+                      AND COALESCE(approved_for_social, FALSE) = FALSE
+                      AND COALESCE(telegram_rejected, FALSE) = FALSE
+                      AND COALESCE(evening_preview_sent, FALSE) = FALSE
+                      AND post_text IS NOT NULL
+                      AND TRIM(post_text) <> ''
+                    ORDER BY id ASC
+                    LIMIT 100
+                    """
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM events
+                WHERE source = 'email_submission'
+                  AND posted_at IS NULL
+                  AND COALESCE(approved_for_social, 0) = 0
+                  AND COALESCE(telegram_rejected, 0) = 0
+                  AND COALESCE(evening_preview_sent, 0) = 0
+                  AND post_text IS NOT NULL
+                  AND TRIM(post_text) <> ''
+                ORDER BY id ASC
+                LIMIT 100
+                """
+            ).fetchall()
+            rows = [dict(r) for r in rows]
+
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            if _created_at_to_berlin_date(r.get("created_at")) == berlin_day:
+                out.append(r)
+        return out[:20]
+
+    def mark_evening_preview_sent(self, event_ids: List[int]) -> None:
+        if not event_ids:
+            return
+        self._ensure_conn()
+        if self.mode == "pg":
+            ph = ",".join(["%s"] * len(event_ids))
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE events
+                    SET evening_preview_sent = TRUE, updated_at = NOW()
+                    WHERE id IN ({ph})
+                    """,
+                    event_ids,
+                )
+            self.conn.commit()
+            return
+
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        q_marks = ",".join("?" * len(event_ids))
+        with self.conn:
+            self.conn.execute(
+                f"""
+                UPDATE events
+                SET evening_preview_sent = 1, updated_at = ?
+                WHERE id IN ({q_marks})
+                """,
+                (now, *event_ids),
             )
 
 

@@ -1,5 +1,6 @@
 """
 Gmail OAuth2: Einreichungen lesen, optional Antwort senden.
+Email-Screening für Event-Plakate und -Texte.
 """
 
 from __future__ import annotations
@@ -7,7 +8,9 @@ from __future__ import annotations
 import base64
 import logging
 import os
+from datetime import datetime
 from email.mime.text import MIMEText
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from google.auth.transport.requests import Request
@@ -16,7 +19,12 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from config import GMAIL_ADDRESS, GOOGLE_CREDENTIALS_FILE, GOOGLE_TOKEN_FILE
+from config import (
+    EMAIL_ATTACHMENT_STORAGE_PATH,
+    GMAIL_ADDRESS,
+    GOOGLE_CREDENTIALS_FILE,
+    GOOGLE_TOKEN_FILE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +169,146 @@ class EmailHandler:
             logger.info("E-Mail gesendet an %s", to)
         except HttpError as error:
             logger.error("Send-Fehler: %s", error)
+
+    def get_pending_email_submissions(
+        self, query: str = "is:unread label:INBOX"
+    ) -> List[Dict[str, Any]]:
+        """
+        Hole unbearbeitete Event-Einreichungs-Emails aus Gmail.
+
+        Args:
+            query: Gmail search query (default: unread inbox messages)
+
+        Returns:
+            Liste von Emails mit vollständiger Analyse
+                - id, subject, sender, body
+                - attachments (mit Metadaten: filename, mime_type, size)
+        """
+        if not self.service:
+            raise RuntimeError("authenticate() zuerst aufrufen")
+
+        try:
+            # 1. Hole Message-IDs
+            results = (
+                self.service.users()
+                .messages()
+                .list(userId="me", q=query, maxResults=20)
+                .execute()
+            )
+            message_ids = [m["id"] for m in results.get("messages", [])]
+            logger.info(f"📧 {len(message_ids)} unbearbeitete Emails gefunden")
+
+            # 2. Für jede Message: hole vollständigen Inhalt
+            emails = []
+            for msg_id in message_ids:
+                msg_data = self.get_message_content(msg_id)
+                if msg_data:
+                    # 3. Extrahiere Attachments
+                    attachments = self._get_attachments_info(msg_id)
+                    msg_data["attachments"] = attachments
+                    emails.append(msg_data)
+
+            return emails
+
+        except HttpError as error:
+            logger.error(f"Email-Abruf Fehler: {error}")
+            return []
+
+    def _get_attachments_info(self, message_id: str) -> List[Dict[str, Any]]:
+        """
+        Extrahiere Anhang-Metadaten aus einer Email (ohne Download).
+
+        Returns:
+            Liste von {filename, mime_type, size, attachment_id}
+        """
+        if not self.service:
+            return []
+
+        try:
+            message = (
+                self.service.users()
+                .messages()
+                .get(userId="me", id=message_id, format="full")
+                .execute()
+            )
+
+            attachments = []
+            parts = message["payload"].get("parts", [])
+
+            for part in parts:
+                if part.get("filename"):
+                    # Das ist eine Datei
+                    headers = {h["name"]: h["value"] for h in part.get("headers", [])}
+                    attachments.append(
+                        {
+                            "filename": part["filename"],
+                            "mime_type": part.get("mimeType", "application/octet-stream"),
+                            "size": int(part.get("body", {}).get("size", 0)),
+                            "attachment_id": part["body"].get("attachmentId", ""),
+                        }
+                    )
+
+            return attachments
+        except HttpError as error:
+            logger.error(f"Attachments-Abruf Fehler: {error}")
+            return []
+
+    def save_attachment_to_storage(
+        self, message_id: str, attachment_id: str, filename: str
+    ) -> Optional[str]:
+        """
+        Speichert Anhang zu Railway Persistent Storage.
+
+        Args:
+            message_id: Gmail message ID
+            attachment_id: Gmail attachment ID
+            filename: Original filename
+
+        Returns:
+            Relativer Pfad zum gespeicherten File (z.B. "/app/email_attachments/...")
+            oder None bei Fehler
+        """
+        if not self.service:
+            raise RuntimeError("authenticate() zuerst aufrufen")
+
+        try:
+            # 1. Erstelle Storage-Ordner falls nicht vorhanden
+            storage_dir = Path(EMAIL_ATTACHMENT_STORAGE_PATH)
+            storage_dir.mkdir(parents=True, exist_ok=True)
+
+            # 2. Generiere eindeutigen Dateinamen
+            # Format: timestamp_originalfilename
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            # Entferne unsichere Zeichen aus Filename
+            safe_filename = "".join(c if c.isalnum() or c in "._-" else "_" for c in filename)
+            unique_filename = f"{timestamp}_{safe_filename}"
+            file_path = storage_dir / unique_filename
+
+            # 3. Download vom Gmail
+            att = (
+                self.service.users()
+                .messages()
+                .attachments()
+                .get(userId="me", messageId=message_id, id=attachment_id)
+                .execute()
+            )
+            file_data = base64.urlsafe_b64decode(att["data"])
+
+            # 4. Speichere Datei
+            with open(file_path, "wb") as f:
+                f.write(file_data)
+
+            logger.info(f"✅ Anhang gespeichert: {file_path}")
+
+            # Return relativer Pfad (für DB-Speicherung)
+            return str(file_path)
+
+        except HttpError as error:
+            logger.error(f"❌ Download-Fehler: {error}")
+            return None
+        except IOError as error:
+            logger.error(f"❌ Datei-Fehler: {error}")
+            return None
 
 
 email_handler = EmailHandler()

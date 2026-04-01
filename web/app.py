@@ -19,12 +19,14 @@ import uuid
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from claude_handler import claude_handler
-from config import DASHBOARD_PASSWORD, DASHBOARD_USER
+from config import DASHBOARD_PASSWORD, DASHBOARD_USER, EMAIL_ATTACHMENT_STORAGE_PATH
 from database import db
 from dm_handler import create_dm_router
+from web.email_approval_dashboard import router as email_router
 from meta_poster import meta_poster
 
 logger = logging.getLogger(__name__)
@@ -52,8 +54,24 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Gifhorn Events Dashboard", lifespan=lifespan)
 
+# Öffentliche Flyer für Meta image_url (PUBLIC_IMAGE_BASE_URL …/flyers/Dateiname)
+_flyers_root = Path(EMAIL_ATTACHMENT_STORAGE_PATH)
+try:
+    _flyers_root.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass
+if _flyers_root.is_dir():
+    app.mount(
+        "/flyers",
+        StaticFiles(directory=str(_flyers_root.resolve())),
+        name="flyers",
+    )
+
 # DM Webhook-Routen im selben Service bereitstellen (später per Reverse Proxy nach außen).
 app.include_router(create_dm_router(), tags=["dm"])
+
+# Email Submission Approval API + Dashboard
+app.include_router(email_router)
 
 
 def require_db() -> None:
