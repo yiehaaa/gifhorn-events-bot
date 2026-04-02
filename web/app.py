@@ -11,16 +11,20 @@ from __future__ import annotations
 
 import logging
 import secrets
+import os
 from contextlib import asynccontextmanager
+from datetime import datetime, date
 from pathlib import Path
 from typing import List, Optional
 import uuid
+import shutil
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, UploadFile, File
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, validator
 
 from claude_handler import claude_handler
 from config import DASHBOARD_PASSWORD, DASHBOARD_USER, EMAIL_ATTACHMENT_STORAGE_PATH, GOOGLE_FORM_URL
@@ -96,6 +100,39 @@ def require_db() -> None:
 async def health() -> dict[str, str]:
     """Ohne Auth — prüfen, ob Uvicorn überhaupt läuft (bei -102 hier testen)."""
     return {"status": "ok", "service": "gifhorn-events-dashboard"}
+
+
+@app.get("/start", response_class=HTMLResponse)
+async def dashboard_start() -> HTMLResponse:
+    """
+    Öffentliche Einstiegshilfe: `/` verlangt sofort Basic Auth (401) — wirkt wie „leere Seite“,
+    wenn der Browser keinen Login-Dialog zeigt oder man die URL nur testet.
+    """
+    html = """<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Gifhorn Events – Web-Dashboard</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+    code { background: #f0f0f0; padding: 0.1em 0.35em; border-radius: 4px; }
+    a { color: #0b57d0; }
+  </style>
+</head>
+<body>
+  <h1>Web-Dashboard</h1>
+  <p>Dieser Railway-Service <strong>ist</strong> das Dashboard (FastAPI + Uvicorn). Die eigentliche Oberfläche liegt unter <code>/</code> und ist mit <strong>HTTP Basic Auth</strong> geschützt.</p>
+  <ol>
+    <li>In Railway beim Service <code>gifhorn-dashboard</code> die Variable <code>DASHBOARD_PASSWORD</code> setzen (und optional <code>DASHBOARD_USER</code>, Standard <code>admin</code>).</li>
+    <li>Die öffentliche URL öffnen (Railway → Service → Networking → Domain), dann auf <a href="/">Startseite /</a> gehen.</li>
+    <li>Der Browser sollte nach <strong>Benutzername und Passwort</strong> fragen — nicht mit der Railway-Anmeldung verwechseln.</li>
+  </ol>
+  <p>Nach dem Login: Eventliste, Freigaben, Einreichung. Wenn stattdessen ein Datenbank-Fehler kommt: Postgres und <code>DATABASE_URL</code> prüfen.</p>
+  <p><a href="/health">Technischer Health-Check (/health)</a> (ohne Login)</p>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 
 
 def require_dashboard_auth(
@@ -261,3 +298,196 @@ async def form_redirect():
     Nutzer klickt Insta/FB Bio → /form/redirect → Google Form.
     """
     return RedirectResponse(url=GOOGLE_FORM_URL, status_code=307)
+
+
+# ==================== WEB FORM (mit dynamischen Uhrzeiten) ====================
+
+class TimeSlot(BaseModel):
+    start: str  # HH:MM
+    end: str    # HH:MM
+
+class EventFormData(BaseModel):
+    title: str
+    startDate: str  # YYYY-MM-DD
+    endDate: str    # YYYY-MM-DD
+    times: List[TimeSlot]
+    location: str
+    city: str
+    description: Optional[str] = ""
+    price: Optional[float] = 0.0
+    url: Optional[str] = ""
+    flyerUrl: Optional[str] = ""
+    email: str
+    source: str = "web_form"
+
+    @validator('title')
+    def title_not_empty(cls, v):
+        if not v or len(v) < 3:
+            raise ValueError('Veranstaltungstitel erforderlich (min. 3 Zeichen)')
+        return v.strip()
+
+    @validator('email')
+    def email_valid(cls, v):
+        if '@' not in v:
+            raise ValueError('Gültige Email erforderlich')
+        return v.strip().lower()
+
+    @validator('location')
+    def location_not_empty(cls, v):
+        if not v or len(v) < 5:
+            raise ValueError('Veranstaltungsort erforderlich')
+        return v.strip()
+
+    @validator('startDate')
+    def start_date_valid(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+        except ValueError:
+            raise ValueError('Ungültiges Startdatum')
+        return v
+
+    @validator('endDate')
+    def end_date_valid(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+        except ValueError:
+            raise ValueError('Ungültiges Enddatum')
+        return v
+
+
+@app.get("/form/event")
+async def form_event_page():
+    """Web-Form für Veranstalter (öffentlich)."""
+    return templates.TemplateResponse("event_form.html", {"request": None})
+
+
+@app.post("/form/submit")
+async def form_submit(
+    title: str = Form(...),
+    startDate: str = Form(...),
+    endDate: str = Form(...),
+    times: str = Form(...),  # JSON string
+    location: str = Form(...),
+    city: str = Form(...),
+    description: str = Form(""),
+    price: float = Form(0.0),
+    url: str = Form(""),
+    email: str = Form(...),
+    source: str = Form("web_form"),
+    flyerFile: UploadFile = File(None),
+    __: None = Depends(require_db),
+):
+    """
+    Event-Submission über Web-Form mit Datei-Upload.
+    - Datei wird lokal in /flyers gespeichert
+    - Event wird in DB gespeichert
+    - Claude Post-Text wird generiert
+    """
+    try:
+        # Validierungen
+        title = title.strip()
+        if not title or len(title) < 3:
+            raise ValueError('Veranstaltungstitel erforderlich (min. 3 Zeichen)')
+
+        if '@' not in email:
+            raise ValueError('Gültige Email erforderlich')
+
+        # Parse Datumsbereich
+        start = datetime.strptime(startDate, '%Y-%m-%d')
+        end = datetime.strptime(endDate, '%Y-%m-%d')
+
+        if end < start:
+            raise ValueError('Enddatum muss nach Startdatum liegen')
+
+        # Parse Uhrzeiten JSON
+        import json
+        try:
+            times_list = json.loads(times)
+        except json.JSONDecodeError:
+            times_list = []
+
+        # Formatiere Uhrzeiten
+        times_formatted = [f"{t['start']}-{t['end']}" for t in times_list] if times_list else []
+        times_str = " | ".join(times_formatted) if times_formatted else "Uhrzeiten nicht angegeben"
+
+        # Speichere Flyer-Datei (optional)
+        flyer_url = ""
+        if flyerFile and flyerFile.filename:
+            try:
+                # Erstelle /flyers Ordner falls nicht existent
+                flyers_dir = Path(EMAIL_ATTACHMENT_STORAGE_PATH)
+                flyers_dir.mkdir(parents=True, exist_ok=True)
+
+                # Generiere sicheren Dateinamen
+                file_ext = Path(flyerFile.filename).suffix
+                safe_filename = f"{uuid.uuid4().hex}{file_ext}"
+                file_path = flyers_dir / safe_filename
+
+                # Speichere Datei
+                with open(file_path, 'wb') as f:
+                    content = await flyerFile.read()
+                    f.write(content)
+
+                # Generiere öffentlichen Link
+                flyer_url = f"/flyers/{safe_filename}"
+                logger.info(f"Flyer hochgeladen: {safe_filename}")
+            except Exception as e:
+                logger.warning(f"Fehler beim Flyer-Upload: {e}")
+                # Fahre trotzdem fort — Flyer ist optional
+
+        # Formatiere event_date
+        days_count = (end - start).days + 1
+        event_date_str = f"{startDate} bis {endDate} ({days_count} Tage) | {times_str}"
+
+        # Erstelle Event
+        event = {
+            "source": source,
+            "source_id": f"webform-{uuid.uuid4().hex[:8]}",
+            "title": title,
+            "event_date": event_date_str,
+            "location": location.strip(),
+            "city": city,
+            "description": description.strip(),
+            "price_min": price or 0.0,
+            "price_max": price or 0.0,
+            "url": url.strip(),
+            "image_url": flyer_url,  # Lokaler Link zu Flyer
+            "contact_email": email.strip(),
+        }
+
+        # Generiere Claude Post-Text
+        post_text = claude_handler.generate_post_text(event)
+
+        # Speichere in DB
+        eid = db.add_event(
+            source=event["source"],
+            source_id=event["source_id"],
+            title=event["title"],
+            description=event["description"],
+            image_url=event["image_url"],
+            event_date=event["event_date"],
+            location=event["location"],
+            city=event["city"],
+            url=event["url"],
+            post_text=post_text,
+            contact_email=event["contact_email"],
+        )
+
+        logger.info(f"Web-Form Event eingereicht: {event['title']} (ID: {eid})")
+
+        return JSONResponse(
+            {"status": "success", "event_id": eid},
+            status_code=200
+        )
+
+    except ValueError as e:
+        return JSONResponse(
+            {"detail": str(e)},
+            status_code=400
+        )
+    except Exception as e:
+        logger.exception("Fehler beim Web-Form Submit")
+        return JSONResponse(
+            {"detail": f"Fehler beim Speichern des Events: {str(e)}"},
+            status_code=500
+        )

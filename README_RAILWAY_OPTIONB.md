@@ -32,6 +32,16 @@ Die Railway-CLI akzeptiert bei **`railway up`** kein `-y` (im Gegensatz z. B. 
 
 *(GitHub-Deploy: im Railway-Dashboard pro Service die **Config-Datei** setzen — `railway-dashboard.json` vs. `railway.json`.)*
 
+## Dashboard im Browser („es gibt keins“?)
+
+Der **Web-Service `gifhorn-dashboard`** ist das Dashboard (Code: `web/app.py`). Es gibt keine separate Railway-Seite mit Formularen ohne Login:
+
+- **`/health`** — JSON, ohne Login (nur prüfen, ob Uvicorn lebt).
+- **`/start`** — kurze **Hilfeseite ohne Login** (erklärt Basic Auth und Railway-Variablen).
+- **`/`** — die eigentliche Oberfläche; der Browser muss **Basic Auth** mit `DASHBOARD_USER` / `DASHBOARD_PASSWORD` senden (Variablen im gleichen Service setzen). Ohne Passwort-Variable: HTTP 503 mit Hinweis.
+
+Öffentliche URL: Railway → Service **gifhorn-dashboard** → **Networking** → generierte Domain (z. B. `https://…up.railway.app`).
+
 ## 1) Dashboard-Service einrichten
 
 ### StartCommand
