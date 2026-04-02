@@ -436,9 +436,9 @@ class EventFormData(BaseModel):
 
 
 @app.get("/form/event")
-async def form_event_page():
+async def form_event_page(request: Request):
     """Web-Form für Veranstalter (öffentlich)."""
-    return templates.TemplateResponse("event_form.html", {"request": None})
+    return templates.TemplateResponse("event_form.html", {"request": request})
 
 
 @app.post("/form/submit")

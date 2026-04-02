@@ -11,3 +11,4 @@ bot.log
 *.log
 *.sqlite3
 .DS_Store
+google_forms_token.json
