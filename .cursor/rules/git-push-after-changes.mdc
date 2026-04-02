@@ -1,0 +1,10 @@
+---
+description: Nach Codeänderungen committen und pushen (Railway deployt aus GitHub)
+alwaysApply: true
+---
+
+# Git: Commit + Push nach Agent-Änderungen
+
+- Wenn du **Produktions- oder Bot-Code** in diesem Repo änderst (`*.py`, `config`, `web/`, `scripts/` die zum Betrieb gehören, `.env.example`, `requirements.txt`, Railway-Manifeste): am Ende der Session einen **sinnvollen Commit** machen und **`git push origin main`** ausführen — so bekommt **Railway** den Stand aus **GitHub** und crasht nicht auf alter `config.py` o. Ä.
+- **Nicht committen:** `.env`, `token.json`, `client_secret.json`, `*_token.json`, `email_attachments/`, große Binärdateien, lokale Experimente — stehen in `.gitignore` bzw. absichtlich untracked lassen.
+- Wenn `git push` fehlschlägt (Auth): kurz im Chat melden, was die Fehlermeldung war; der Nutzer muss dann ggf. GitHub-Anmeldung / SSH nachziehen.
