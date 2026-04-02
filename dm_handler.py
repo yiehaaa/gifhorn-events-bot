@@ -9,6 +9,7 @@ Hinweis:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -113,7 +114,9 @@ def create_dm_router(handler: Optional[DMHandler] = None) -> APIRouter:
         data = await request.json()
         for entry in data.get("entry", []) or []:
             for message in entry.get("messaging", []) or []:
-                h.handle_message(message, "instagram")
+                # Sync (DB + requests) darf den ASGI-Event-Loop nicht blockieren —
+                # sonst hängen /health und das ganze Dashboard.
+                await asyncio.to_thread(h.handle_message, message, "instagram")
         return PlainTextResponse("OK")
 
     @router.get("/webhook/facebook")
@@ -128,7 +131,7 @@ def create_dm_router(handler: Optional[DMHandler] = None) -> APIRouter:
         data = await request.json()
         for entry in data.get("entry", []) or []:
             for message in entry.get("messaging", []) or []:
-                h.handle_message(message, "facebook")
+                await asyncio.to_thread(h.handle_message, message, "facebook")
         return PlainTextResponse("OK")
 
     return router

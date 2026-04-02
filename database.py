@@ -57,7 +57,9 @@ class Database:
         if self.mode == "pg":
             if not DATABASE_URL:
                 raise RuntimeError("DATABASE_URL fehlt, aber Modus=pg")
-            self.conn = psycopg2.connect(DATABASE_URL)
+            # Ohne Timeout kann connect() bei Netz/DB-Problemen hängen und den ganzen
+            # Uvicorn-Prozess blockieren (z. B. wenn Webhooks sync DB nutzen).
+            self.conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
             logger.info("PostgreSQL verbunden")
             return
 
