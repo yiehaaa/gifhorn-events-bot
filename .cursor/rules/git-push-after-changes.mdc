@@ -12,4 +12,4 @@ alwaysApply: true
 ## Railway (dieses Repo)
 
 - Deploy per **`railway up`** nutzt **root-`railway.json`** (= Worker). **Dashboard:** `./scripts/railway_up_dashboard.sh` verwenden, sonst startet Uvicorn nicht.
-- Nach sinnvollen Änderungen ggf. **beide** Services aktualisieren (Skript + `railway up -s gifhorn-worker -c -y`).
+- Nach sinnvollen Änderungen ggf. **beide** Services aktualisieren (Skript + `railway up -s gifhorn-worker -c -m "…"`). *(Bei `railway up` gibt es kein `-y` — das kennen andere Railway-Befehle.)*

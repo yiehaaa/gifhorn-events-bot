@@ -25,8 +25,10 @@ Wenn du das **Dashboard** per CLI deployen willst, kurz die Dashboard-Config ein
 Der Worker wie gewohnt:
 
 ```bash
-railway up -s gifhorn-worker -c -y -m "worker update"
+railway up -s gifhorn-worker -c -m "worker update"
 ```
+
+Die Railway-CLI akzeptiert bei **`railway up`** kein `-y` (im Gegensatz z. B. zu `railway service restart -y`); ohne `-y` deployt der Befehl direkt.
 
 *(GitHub-Deploy: im Railway-Dashboard pro Service die **Config-Datei** setzen — `railway-dashboard.json` vs. `railway.json`.)*
 
