@@ -13,6 +13,23 @@ Im Repo gibt es dafür zwei Templates:
 - `railway-dashboard.json` → Dashboard-Service (`uvicorn web.app:app`)
 - `railway.json` → Worker-Service (`python worker.py --post`)
 
+### Wichtig: `railway up` und die root-`railway.json`
+
+Die CLI **`railway up`** packt immer die **root-`railway.json`** ins Image — die ist für den **Worker** (`python worker.py --post`).  
+Wenn du das **Dashboard** per CLI deployen willst, kurz die Dashboard-Config einspielen:
+
+```bash
+./scripts/railway_up_dashboard.sh "deploy message"
+```
+
+Der Worker wie gewohnt:
+
+```bash
+railway up -s gifhorn-worker -c -y -m "worker update"
+```
+
+*(GitHub-Deploy: im Railway-Dashboard pro Service die **Config-Datei** setzen — `railway-dashboard.json` vs. `railway.json`.)*
+
 ## 1) Dashboard-Service einrichten
 
 ### StartCommand

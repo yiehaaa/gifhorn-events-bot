@@ -8,3 +8,8 @@ alwaysApply: true
 - Wenn du **Produktions- oder Bot-Code** in diesem Repo änderst (`*.py`, `config`, `web/`, `scripts/` die zum Betrieb gehören, `.env.example`, `requirements.txt`, Railway-Manifeste): am Ende der Session einen **sinnvollen Commit** machen und **`git push origin main`** ausführen — so bekommt **Railway** den Stand aus **GitHub** und crasht nicht auf alter `config.py` o. Ä.
 - **Nicht committen:** `.env`, `token.json`, `client_secret.json`, `*_token.json`, `email_attachments/`, große Binärdateien, lokale Experimente — stehen in `.gitignore` bzw. absichtlich untracked lassen.
 - Wenn `git push` fehlschlägt (Auth): kurz im Chat melden, was die Fehlermeldung war; der Nutzer muss dann ggf. GitHub-Anmeldung / SSH nachziehen.
+
+## Railway (dieses Repo)
+
+- Deploy per **`railway up`** nutzt **root-`railway.json`** (= Worker). **Dashboard:** `./scripts/railway_up_dashboard.sh` verwenden, sonst startet Uvicorn nicht.
+- Nach sinnvollen Änderungen ggf. **beide** Services aktualisieren (Skript + `railway up -s gifhorn-worker -c -y`).
