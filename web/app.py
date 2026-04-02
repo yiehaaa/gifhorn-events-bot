@@ -13,7 +13,7 @@ import logging
 import secrets
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 from typing import List, Optional
 import uuid
@@ -27,7 +27,24 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, validator
 
 from claude_handler import claude_handler
-from config import DASHBOARD_PASSWORD, DASHBOARD_USER, EMAIL_ATTACHMENT_STORAGE_PATH, GOOGLE_FORM_URL
+from config import (
+    AUTO_APPROVE_SOCIAL_FOR_EMAIL_SUBMISSIONS,
+    AUTO_POST_AFTER_EMAIL_CONVERSION,
+    CRON_COLLECT_TIME,
+    CRON_EVENING_PREVIEW_TIME,
+    DASHBOARD_PASSWORD,
+    DASHBOARD_USER,
+    EMAIL_ATTACHMENT_STORAGE_PATH,
+    EMAIL_SCREENING_ENABLED,
+    GOOGLE_FORM_URL,
+    META_ACCESS_TOKEN,
+    MOCK_MODE,
+    POSTING_TIME,
+    POSTING_TIMEZONE,
+    PUBLIC_IMAGE_BASE_URL,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+)
 from database import db
 from dm_handler import create_dm_router
 from web.email_approval_dashboard import router as email_router
@@ -128,7 +145,8 @@ async def dashboard_start() -> HTMLResponse:
     <li>Die öffentliche URL öffnen (Railway → Service → Networking → Domain), dann auf <a href="/">Startseite /</a> gehen.</li>
     <li>Der Browser sollte nach <strong>Benutzername und Passwort</strong> fragen — nicht mit der Railway-Anmeldung verwechseln.</li>
   </ol>
-  <p>Nach dem Login: Eventliste, Freigaben, Einreichung. Wenn stattdessen ein Datenbank-Fehler kommt: Postgres und <code>DATABASE_URL</code> prüfen.</p>
+  <p>Nach dem Login: <strong>Betrieb &amp; Live</strong> (MOCK_MODE, angebundene APIs, E-Mail-Warteschlange, Auto-Flags — aktualisiert sich alle 45&nbsp;s), Eventliste, Freigaben, Einreichung. E-Mail-Flyer: <a href="/api/emails/">/api/emails/</a> (ebenfalls nach Login).</p>
+  <p>Wenn stattdessen ein Datenbank-Fehler kommt: Postgres und <code>DATABASE_URL</code> prüfen.</p>
   <p><a href="/health">Technischer Health-Check (/health)</a> (ohne Login)</p>
 </body>
 </html>"""
@@ -175,14 +193,43 @@ async def dashboard(
     f = _normalize_filter(status_filter)
     events = db.list_events_dashboard(status_filter=f, limit=250)
     stats = db.dashboard_stats()
+    email_stats = db.dashboard_email_submission_stats()
     logs = db.list_recent_logs(limit=35)
+    now_utc = datetime.now(timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+
+        _tz = ZoneInfo(POSTING_TIMEZONE)
+        now_local_str = datetime.now(_tz).strftime("%d.%m.%Y %H:%M:%S")
+    except Exception:
+        now_local_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+    live = {
+        "generated_at": now_utc.isoformat(),
+        "now_local": now_local_str,
+        "timezone_label": POSTING_TIMEZONE,
+        "mock_mode": MOCK_MODE,
+        "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        "meta_token_set": bool(META_ACCESS_TOKEN),
+        "public_image_base_url_set": bool(PUBLIC_IMAGE_BASE_URL),
+        "email_screening_enabled": EMAIL_SCREENING_ENABLED,
+        "auto_post_after_email": AUTO_POST_AFTER_EMAIL_CONVERSION,
+        "auto_approve_email_social": AUTO_APPROVE_SOCIAL_FOR_EMAIL_SUBMISSIONS,
+        "schedule": {
+            "collect": CRON_COLLECT_TIME,
+            "evening_preview": CRON_EVENING_PREVIEW_TIME,
+            "posting": POSTING_TIME,
+            "timezone": POSTING_TIMEZONE,
+        },
+    }
     return templates.TemplateResponse(
         request,
         "dashboard.html",
         {
             "events": events,
             "stats": stats,
+            "email_stats": email_stats,
             "logs": logs,
+            "live": live,
             "current_filter": f,
             "filters": [
                 ("all", "Alle"),
@@ -192,6 +239,39 @@ async def dashboard(
                 ("rejected", "Abgelehnt"),
             ],
         },
+    )
+
+
+@app.get("/api/dashboard/snapshot")
+async def dashboard_snapshot(
+    _: str = Depends(require_dashboard_auth),
+    __: None = Depends(require_db),
+) -> JSONResponse:
+    """
+    Kompakte Live-Daten für Auto-Refresh im Browser (gleiche Basic Auth wie /).
+    """
+    now_utc = datetime.now(timezone.utc)
+    return JSONResponse(
+        {
+            "generated_at": now_utc.isoformat(),
+            "stats": db.dashboard_stats(),
+            "email_stats": db.dashboard_email_submission_stats(),
+            "runtime": {
+                "mock_mode": MOCK_MODE,
+                "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+                "meta_token_set": bool(META_ACCESS_TOKEN),
+                "public_image_base_url_set": bool(PUBLIC_IMAGE_BASE_URL),
+                "email_screening_enabled": EMAIL_SCREENING_ENABLED,
+                "auto_post_after_email": AUTO_POST_AFTER_EMAIL_CONVERSION,
+                "auto_approve_email_social": AUTO_APPROVE_SOCIAL_FOR_EMAIL_SUBMISSIONS,
+            },
+            "schedule": {
+                "collect": CRON_COLLECT_TIME,
+                "evening_preview": CRON_EVENING_PREVIEW_TIME,
+                "posting": POSTING_TIME,
+                "timezone": POSTING_TIMEZONE,
+            },
+        }
     )
 
 
@@ -367,8 +447,9 @@ async def form_submit(
     startDate: str = Form(...),
     endDate: str = Form(...),
     times: str = Form(...),  # JSON string
-    location: str = Form(...),
-    city: str = Form(...),
+    locationStreet: str = Form(...),
+    locationZip: str = Form(...),
+    locationCity: str = Form(...),
     description: str = Form(""),
     price: float = Form(0.0),
     url: str = Form(""),
@@ -388,6 +469,18 @@ async def form_submit(
         title = title.strip()
         if not title or len(title) < 3:
             raise ValueError('Veranstaltungstitel erforderlich (min. 3 Zeichen)')
+
+        locationStreet = locationStreet.strip()
+        if not locationStreet or len(locationStreet) < 3:
+            raise ValueError('Straße/Ort erforderlich')
+
+        locationZip = locationZip.strip()
+        if not locationZip or not locationZip.isdigit() or len(locationZip) != 5:
+            raise ValueError('PLZ erforderlich (5 Ziffern)')
+
+        locationCity = locationCity.strip()
+        if not locationCity or len(locationCity) < 2:
+            raise ValueError('Ort/Dorf erforderlich')
 
         if '@' not in email:
             raise ValueError('Gültige Email erforderlich')
@@ -439,14 +532,17 @@ async def form_submit(
         days_count = (end - start).days + 1
         event_date_str = f"{startDate} bis {endDate} ({days_count} Tage) | {times_str}"
 
+        # Kombiniere die drei Standort-Felder
+        location_combined = f"{locationStreet} {locationZip} {locationCity}"
+
         # Erstelle Event
         event = {
             "source": source,
             "source_id": f"webform-{uuid.uuid4().hex[:8]}",
             "title": title,
             "event_date": event_date_str,
-            "location": location.strip(),
-            "city": city,
+            "location": location_combined,
+            "city": locationCity,  # Stadt wird aus dem "Ort/Dorf" Feld genommen
             "description": description.strip(),
             "price_min": price or 0.0,
             "price_max": price or 0.0,

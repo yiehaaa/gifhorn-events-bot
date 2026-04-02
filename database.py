@@ -703,6 +703,49 @@ class Database:
             "total": int(row[4] or 0),
         }
 
+    def dashboard_email_submission_stats(self) -> Dict[str, int]:
+        """Zähler für E-Mail-Freigabe (Screening), fürs Live-Dashboard."""
+        self._ensure_conn()
+        if self.mode == "pg":
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                      COUNT(*) FILTER (WHERE approval_status = 'pending') AS pending,
+                      COUNT(*) FILTER (WHERE approval_status = 'approved') AS approved,
+                      COUNT(*) FILTER (WHERE approval_status = 'rejected') AS rejected,
+                      COUNT(*) AS total
+                    FROM email_submissions
+                    """
+                )
+                row = cur.fetchone()
+            if not row:
+                return {"pending": 0, "approved": 0, "rejected": 0, "total": 0}
+            return {
+                "pending": int(row[0] or 0),
+                "approved": int(row[1] or 0),
+                "rejected": int(row[2] or 0),
+                "total": int(row[3] or 0),
+            }
+
+        row = self.conn.execute(
+            """
+            SELECT
+              SUM(CASE WHEN approval_status = 'pending' THEN 1 ELSE 0 END) AS pending,
+              SUM(CASE WHEN approval_status = 'approved' THEN 1 ELSE 0 END) AS approved,
+              SUM(CASE WHEN approval_status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+              COUNT(*) AS total
+            FROM email_submissions
+            """
+        ).fetchone()
+
+        return {
+            "pending": int(row[0] or 0),
+            "approved": int(row[1] or 0),
+            "rejected": int(row[2] or 0),
+            "total": int(row[3] or 0),
+        }
+
     def list_recent_logs(self, limit: int = 40) -> List[Dict[str, Any]]:
         self._ensure_conn()
         if self.mode == "pg":

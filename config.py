@@ -256,6 +256,7 @@ def public_image_url(stored: str) -> str:
     """
     Wandelt einen lokalen Anhang-Pfad in eine öffentliche URL um, wenn
     PUBLIC_IMAGE_BASE_URL gesetzt ist (sonst unverändert — Meta braucht https).
+    Nutzt Route /flyers/{filename} vom Dashboard.
     """
     if not stored:
         return ""
@@ -266,4 +267,4 @@ def public_image_url(stored: str) -> str:
     if not base:
         return s
     name = Path(s).name
-    return f"{base}/{name}"
+    return f"{base}/flyers/{name}"

@@ -125,19 +125,69 @@
     }
     .muted { color: var(--muted); font-size: 0.82rem; }
     .post-preview { max-width: 280px; white-space: pre-wrap; word-break: break-word; }
+    .live-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 0.35rem 1.25rem;
+      font-size: 0.88rem;
+    }
+    .live-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 0.75rem;
+      padding: 0.4rem 0;
+      border-bottom: 1px dashed var(--line);
+    }
+    .live-row:last-child { border-bottom: none; }
+    .live-row span:first-child { color: var(--muted); }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Gifhorn Events</h1>
-    <p class="sub">Übersicht und Freigaben — gleiche Logik wie Telegram (ohne Bot zu ersetzen).</p>
+    <p class="sub">Übersicht und Freigaben — gleiche Logik wie Telegram (ohne Bot zu ersetzen). Zahlen unten werden alle 45&nbsp;s neu geladen.</p>
+
+    <div class="card" style="margin-bottom: 1.25rem;">
+      <div style="padding: 1rem 1rem 1.1rem;">
+        <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:0.75rem; margin-bottom:0.75rem;">
+          <h2 style="margin:0; font-family: &quot;Syne&quot;, sans-serif;">Betrieb &amp; Live</h2>
+          <span class="muted" id="live-refresh-status">Auto-Refresh aktiv</span>
+        </div>
+        <p class="muted" style="margin:0 0 0.85rem;">
+          <span id="live-time">{{ live.now_local }}</span>
+          · {{ live.timezone_label }}
+          · Snapshot <code id="live-generated" style="font-size:0.8em;">{{ live.generated_at[:19] }}Z</code>
+        </p>
+        <div class="live-grid">
+          <div class="live-row"><span>MOCK_MODE</span><strong id="live-mock">{% if live.mock_mode %}Ja (Simulation){% else %}Nein (Live-APIs){% endif %}</strong></div>
+          <div class="live-row"><span>Telegram-Bot</span><strong id="live-tg">{% if live.telegram_configured %}konfiguriert{% else %}fehlt{% endif %}</strong></div>
+          <div class="live-row"><span>Meta-Token</span><strong id="live-meta">{% if live.meta_token_set %}gesetzt{% else %}fehlt{% endif %}</strong></div>
+          <div class="live-row"><span>PUBLIC_IMAGE_BASE_URL</span><strong id="live-pub">{% if live.public_image_base_url_set %}gesetzt{% else %}fehlt{% endif %}</strong></div>
+          <div class="live-row"><span>E-Mail-Screening</span><strong id="live-escreen">{% if live.email_screening_enabled %}an{% else %}aus{% endif %}</strong></div>
+          <div class="live-row"><span>E-Mails zur Freigabe</span><strong id="stat-email-pending">{{ email_stats.pending }}</strong></div>
+          <div class="live-row"><span>Auto-Post nach Mail→Event</span><strong id="live-autopost">{% if live.auto_post_after_email %}Ja{% else %}Nein{% endif %}</strong></div>
+          <div class="live-row"><span>Auto-Social nach Mail-Freigabe</span><strong id="live-autoappr">{% if live.auto_approve_email_social %}Ja{% else %}Nein{% endif %}</strong></div>
+        </div>
+        <p class="muted" style="margin:0.85rem 0 0.5rem;">
+          Geplante Uhrzeiten (Orientierung, Cron in Railway): Sammlung <strong>{{ live.schedule.collect }}</strong>,
+          Abend-Vorschau <strong>{{ live.schedule.evening_preview }}</strong>, Posting-Ziel <strong>{{ live.schedule.posting }}</strong>
+        </p>
+        <div class="filters" style="margin-bottom:0;">
+          <a href="/api/emails/">E-Mail-Posteingang</a>
+          <a href="/health" target="_blank" rel="noopener">/health</a>
+          <a href="/start" target="_blank" rel="noopener">/start</a>
+          <button type="button" id="btn-refresh-now">Jetzt aktualisieren</button>
+        </div>
+      </div>
+    </div>
 
     <div class="stats">
-      <div class="stat"><span>Gesamt</span><b>{{ stats.total }}</b></div>
-      <div class="stat"><span>Warten</span><b>{{ stats.awaiting }}</b></div>
-      <div class="stat"><span>Meta bereit</span><b>{{ stats.ready }}</b></div>
-      <div class="stat"><span>Gepostet</span><b>{{ stats.posted }}</b></div>
-      <div class="stat"><span>Abgelehnt</span><b>{{ stats.rejected }}</b></div>
+      <div class="stat"><span>Gesamt</span><b id="stat-total">{{ stats.total }}</b></div>
+      <div class="stat"><span>Warten</span><b id="stat-awaiting">{{ stats.awaiting }}</b></div>
+      <div class="stat"><span>Meta bereit</span><b id="stat-ready">{{ stats.ready }}</b></div>
+      <div class="stat"><span>Gepostet</span><b id="stat-posted">{{ stats.posted }}</b></div>
+      <div class="stat"><span>Abgelehnt</span><b id="stat-rejected">{{ stats.rejected }}</b></div>
     </div>
 
     <div class="filters">
@@ -263,8 +313,8 @@
       </table>
     </div>
 
-    <details class="logs">
-      <summary>Letzte Log-Einträge (DB)</summary>
+    <details class="logs" open>
+      <summary>Letzte Log-Einträge (DB) — nach Refresh Seite neu laden (F5), um Logs zu aktualisieren</summary>
       <pre class="log">{% for log in logs %}[{{ log.created_at }}] {{ log.level }} — {{ log.message }}
 {% if log.context %}  ctx: {{ log.context }}
 {% endif %}
@@ -272,5 +322,52 @@
 {% endfor %}</pre>
     </details>
   </div>
+  <script>
+(function () {
+  var TZ = "Europe/Berlin";
+  function yn(v) { return v ? "Ja" : "Nein"; }
+  function setText(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+  function applySnapshot(data) {
+    if (!data) return;
+    try {
+      var d = new Date(data.generated_at);
+      var localStr = d.toLocaleString("de-DE", { timeZone: TZ, dateStyle: "short", timeStyle: "medium" });
+      setText("live-time", localStr + " · " + TZ);
+      setText("live-generated", data.generated_at.slice(0, 19) + "Z");
+      var st = data.stats || {};
+      setText("stat-total", String(st.total != null ? st.total : "—"));
+      setText("stat-awaiting", String(st.awaiting != null ? st.awaiting : "—"));
+      setText("stat-ready", String(st.ready != null ? st.ready : "—"));
+      setText("stat-posted", String(st.posted != null ? st.posted : "—"));
+      setText("stat-rejected", String(st.rejected != null ? st.rejected : "—"));
+      var em = data.email_stats || {};
+      setText("stat-email-pending", String(em.pending != null ? em.pending : "—"));
+      var rt = data.runtime || {};
+      setText("live-mock", rt.mock_mode ? "Ja (Simulation)" : "Nein (Live-APIs)");
+      setText("live-tg", rt.telegram_configured ? "konfiguriert" : "fehlt");
+      setText("live-meta", rt.meta_token_set ? "gesetzt" : "fehlt");
+      setText("live-pub", rt.public_image_base_url_set ? "gesetzt" : "fehlt");
+      setText("live-escreen", rt.email_screening_enabled ? "an" : "aus");
+      setText("live-autopost", yn(rt.auto_post_after_email));
+      setText("live-autoappr", yn(rt.auto_approve_email_social));
+      setText("live-refresh-status", "Zuletzt: " + localStr);
+    } catch (e) { /* ignore */ }
+  }
+  function pull() {
+    fetch("/api/dashboard/snapshot", { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+      .then(applySnapshot)
+      .catch(function () {
+        setText("live-refresh-status", "Snapshot fehlgeschlagen (Netzwerk/Auth)");
+      });
+  }
+  var btn = document.getElementById("btn-refresh-now");
+  if (btn) btn.addEventListener("click", pull);
+  setInterval(pull, 45000);
+})();
+  </script>
 </body>
 </html>

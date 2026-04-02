@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Südheide Veranstaltungen — Event einreichen</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 700px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            padding: 40px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .form-group {
+            margin-bottom: 24px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+            font-size: 14px;
+        }
+
+        input[type="text"],
+        input[type="email"],
+        input[type="date"],
+        input[type="time"],
+        input[type="number"],
+        textarea,
+        select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 14px;
+            font-family: inherit;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus,
+        input[type="email"]:focus,
+        input[type="date"]:focus,
+        input[type="time"]:focus,
+        input[type="number"]:focus,
+        textarea:focus,
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 100px;
+        }
+
+        .date-range {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .time-fields {
+            background: #f8f9fa;
+            padding: 16px;
+            border-radius: 8px;
+            margin-bottom: 12px;
+        }
+
+        .time-field {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .time-field:last-child {
+            margin-bottom: 0;
+        }
+
+        .day-label {
+            color: #666;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+
+        button {
+            flex: 1;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-submit {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-submit:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-submit:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+
+        .required::after {
+            content: " *";
+            color: #e74c3c;
+        }
+
+        .error {
+            color: #e74c3c;
+            font-size: 13px;
+            margin-top: 4px;
+        }
+
+        .success {
+            background: #d4edda;
+            color: #155724;
+            padding: 16px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            color: #666;
+        }
+
+        input.invalid,
+        textarea.invalid {
+            border-color: #e74c3c;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎪 Südheide Veranstaltungen</h1>
+        <p class="subtitle">Reiche dein Event ein — wir posten es auf Instagram & Facebook!</p>
+
+        <div class="success" id="successMessage">
+            ✅ Event erfolgreich eingereicht! Danke!
+        </div>
+
+        <form id="eventForm">
+            <!-- Veranstaltungstitel -->
+            <div class="form-group">
+                <label for="title" class="required">Wie heißt die Veranstaltung?</label>
+                <input type="text" id="title" name="title" placeholder="z.B. Konzert, Vortrag, Ausstellung" required>
+                <div class="error" id="error-title"></div>
+            </div>
+
+            <!-- Datumsbereich -->
+            <div class="form-group">
+                <label class="required">Zeitraum</label>
+                <div class="date-range">
+                    <div>
+                        <label style="margin-bottom: 4px;">Veranstaltung beginnt</label>
+                        <input type="date" id="startDate" name="startDate" required>
+                        <div class="error" id="error-startDate"></div>
+                    </div>
+                    <div>
+                        <label style="margin-bottom: 4px;">Veranstaltung endet</label>
+                        <input type="date" id="endDate" name="endDate" required>
+                        <div class="error" id="error-endDate"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Uhrzeiten -->
+            <div class="form-group">
+                <label class="required">Uhrzeiten pro Tag</label>
+                <div class="button-group">
+                    <button type="button" class="btn-secondary" id="btnAllEqual">Alle gleich</button>
+                </div>
+                <div id="timeFieldsContainer"></div>
+                <div class="error" id="error-times"></div>
+            </div>
+
+            <!-- Veranstaltungsort -->
+            <div class="form-group">
+                <label class="required">Veranstaltungsort</label>
+                <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px;">
+                    <div>
+                        <label style="margin-bottom: 4px; font-size: 13px; color: #666;">Straße/Ort</label>
+                        <input type="text" id="locationStreet" name="locationStreet" placeholder="z.B. Schützenplatz, Schulstraße 5" required>
+                        <div class="error" id="error-locationStreet"></div>
+                    </div>
+                    <div>
+                        <label style="margin-bottom: 4px; font-size: 13px; color: #666;">PLZ</label>
+                        <input type="text" id="locationZip" name="locationZip" placeholder="38518" pattern="\d{5}" required>
+                        <div class="error" id="error-locationZip"></div>
+                    </div>
+                    <div>
+                        <label style="margin-bottom: 4px; font-size: 13px; color: #666;">Ort/Dorf</label>
+                        <input type="text" id="locationCity" name="locationCity" placeholder="z.B. Neubokel" required>
+                        <div class="error" id="error-locationCity"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Beschreibung -->
+            <div class="form-group">
+                <label for="description">Beschreibung</label>
+                <textarea id="description" name="description" placeholder="Worum geht es? Was sollten Besucher wissen?"></textarea>
+                <div class="error" id="error-description"></div>
+            </div>
+
+            <!-- Eintritt -->
+            <div class="form-group">
+                <label for="price">Eintritt (€)</label>
+                <input type="number" id="price" name="price" placeholder="0 für kostenlos" min="0" step="0.01">
+                <div class="error" id="error-price"></div>
+            </div>
+
+            <!-- Link -->
+            <div class="form-group">
+                <label for="url">Link zu mehr Informationen</label>
+                <input type="text" id="url" name="url" placeholder="https://example.com/event">
+                <div class="error" id="error-url"></div>
+            </div>
+
+            <!-- Flyer Upload -->
+            <div class="form-group">
+                <label for="flyerFile">Flyer hochladen (PDF, JPG, PNG — max 10MB)</label>
+                <input type="file" id="flyerFile" name="flyerFile" accept=".pdf,.jpg,.jpeg,.png" style="padding: 8px;">
+                <small style="color: #999;">Optional — wird direkt hochgeladen</small>
+                <div class="error" id="error-flyerFile"></div>
+            </div>
+
+            <!-- Email -->
+            <div class="form-group">
+                <label for="email" class="required">Deine Email (für Rückfragen)</label>
+                <input type="email" id="email" name="email" placeholder="deine@email.de" required>
+                <div class="error" id="error-email"></div>
+            </div>
+
+            <!-- Submit -->
+            <div class="button-group">
+                <button type="submit" class="btn-submit" id="submitBtn">Event einreichen</button>
+            </div>
+
+            <div class="loading" id="loading">
+                ⏳ Event wird eingereicht...
+            </div>
+        </form>
+    </div>
+
+    <script>
+        const form = document.getElementById('eventForm');
+        const startDateInput = document.getElementById('startDate');
+        const endDateInput = document.getElementById('endDate');
+        const timeFieldsContainer = document.getElementById('timeFieldsContainer');
+        const btnAllEqual = document.getElementById('btnAllEqual');
+        const submitBtn = document.getElementById('submitBtn');
+        const loading = document.getElementById('loading');
+        const successMessage = document.getElementById('successMessage');
+
+        // Berechne Tageanzahl und erstelle Uhrzeiten-Felder
+        function updateTimeFields() {
+            const startDate = new Date(startDateInput.value);
+            const endDate = new Date(endDateInput.value);
+
+            if (!startDateInput.value || !endDateInput.value) {
+                timeFieldsContainer.innerHTML = '';
+                return;
+            }
+
+            if (endDate < startDate) {
+                document.getElementById('error-endDate').textContent = 'Enddatum muss nach Startdatum liegen';
+                timeFieldsContainer.innerHTML = '';
+                return;
+            }
+
+            document.getElementById('error-endDate').textContent = '';
+
+            const daysCount = Math.floor((endDate - startDate) / (1000 * 60 * 60 * 24)) + 1;
+
+            // Erstelle Uhrzeiten-Felder
+            timeFieldsContainer.innerHTML = '';
+            for (let i = 0; i < daysCount; i++) {
+                const currentDate = new Date(startDate);
+                currentDate.setDate(currentDate.getDate() + i);
+                const dateStr = currentDate.toLocaleDateString('de-DE', { weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit' });
+
+                const fieldHTML = `
+                    <div class="time-field">
+                        <div>
+                            <div class="day-label">Tag ${i + 1} — ${dateStr}</div>
+                            <input type="time" name="timeStart${i}" placeholder="Von">
+                        </div>
+                        <div>
+                            <div class="day-label">&nbsp;</div>
+                            <input type="time" name="timeEnd${i}" placeholder="Bis">
+                        </div>
+                    </div>
+                `;
+                timeFieldsContainer.innerHTML += fieldHTML;
+            }
+        }
+
+        // "Alle gleich" Button
+        btnAllEqual.addEventListener('click', (e) => {
+            e.preventDefault();
+
+            const timeInputs = timeFieldsContainer.querySelectorAll('input[type="time"]');
+            if (timeInputs.length === 0) {
+                alert('Bitte wähle zuerst Start- und Enddatum!');
+                return;
+            }
+
+            const firstTimeStart = timeInputs[0].value;
+            if (!firstTimeStart) {
+                alert('Bitte füll zuerst die erste Uhrzeit aus!');
+                return;
+            }
+
+            // Kopiere die erste Uhrzeit zu allen anderen
+            for (let i = 0; i < timeInputs.length; i++) {
+                if (i % 2 === 0) {
+                    // Start-Zeit
+                    timeInputs[i].value = firstTimeStart;
+                } else {
+                    // End-Zeit (setze auf die zweite Eingabe)
+                    if (i === 1 && timeInputs[1].value) {
+                        const endTime = timeInputs[1].value;
+                        for (let j = i; j < timeInputs.length; j += 2) {
+                            timeInputs[j].value = endTime;
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Event Listener
+        startDateInput.addEventListener('change', updateTimeFields);
+        endDateInput.addEventListener('change', updateTimeFields);
+
+        // Form Submit
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            // Validierung
+            const errors = {};
+            const title = document.getElementById('title').value.trim();
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
+            const locationStreet = document.getElementById('locationStreet').value.trim();
+            const locationZip = document.getElementById('locationZip').value.trim();
+            const locationCity = document.getElementById('locationCity').value.trim();
+            const email = document.getElementById('email').value.trim();
+            const flyerFile = document.getElementById('flyerFile').files[0];
+
+            if (!title || title.length < 3) errors['title'] = 'Veranstaltungstitel erforderlich (min. 3 Zeichen)';
+            if (!startDate) errors['startDate'] = 'Startdatum erforderlich';
+            if (!endDate) errors['endDate'] = 'Enddatum erforderlich';
+            if (!locationStreet || locationStreet.length < 3) errors['locationStreet'] = 'Straße/Ort erforderlich';
+            if (!locationZip || !/^\d{5}$/.test(locationZip)) errors['locationZip'] = 'PLZ erforderlich (5 Ziffern)';
+            if (!locationCity || locationCity.length < 2) errors['locationCity'] = 'Ort/Dorf erforderlich';
+            if (!email || !email.includes('@')) errors['email'] = 'Gültige Email erforderlich';
+
+            // Datei-Validierung
+            if (flyerFile) {
+                if (flyerFile.size > 10 * 1024 * 1024) { // 10MB
+                    errors['flyerFile'] = 'Datei darf max 10MB groß sein';
+                }
+                const validTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'];
+                if (!validTypes.includes(flyerFile.type)) {
+                    errors['flyerFile'] = 'Nur PDF, JPG, PNG erlaubt';
+                }
+            }
+
+            // Uhrzeiten validieren
+            const timeInputs = timeFieldsContainer.querySelectorAll('input[type="time"]');
+            const times = [];
+            for (let i = 0; i < timeInputs.length; i += 2) {
+                const startTime = timeInputs[i].value;
+                const endTime = timeInputs[i + 1].value;
+                if (startTime || endTime) {
+                    if (!startTime || !endTime) {
+                        errors['times'] = 'Bitte füll Start- und Endzeit aus';
+                        break;
+                    }
+                    times.push({ start: startTime, end: endTime });
+                }
+            }
+
+            // Fehler anzeigen
+            document.querySelectorAll('.error').forEach(el => el.textContent = '');
+            for (const [key, msg] of Object.entries(errors)) {
+                const errorEl = document.getElementById(`error-${key}`);
+                if (errorEl) errorEl.textContent = msg;
+            }
+
+            if (Object.keys(errors).length > 0) return;
+
+            // Sende Daten als multipart/form-data (wegen Datei-Upload)
+            loading.style.display = 'block';
+            submitBtn.disabled = true;
+
+            const formDataToSend = new FormData();
+            formDataToSend.append('title', title);
+            formDataToSend.append('startDate', startDate);
+            formDataToSend.append('endDate', endDate);
+            formDataToSend.append('times', JSON.stringify(times));
+            formDataToSend.append('locationStreet', locationStreet);
+            formDataToSend.append('locationZip', locationZip);
+            formDataToSend.append('locationCity', locationCity);
+            formDataToSend.append('description', document.getElementById('description').value.trim());
+            formDataToSend.append('price', parseFloat(document.getElementById('price').value) || 0);
+            formDataToSend.append('url', document.getElementById('url').value.trim());
+            formDataToSend.append('email', email);
+            formDataToSend.append('source', 'web_form');
+            if (flyerFile) {
+                formDataToSend.append('flyerFile', flyerFile);
+            }
+
+            try {
+                const response = await fetch('/form/submit', {
+                    method: 'POST',
+                    body: formDataToSend
+                    // Nicht 'Content-Type' setzen — Browser macht das automatisch mit richtigem boundary
+                });
+
+                if (response.ok) {
+                    successMessage.style.display = 'block';
+                    form.reset();
+                    timeFieldsContainer.innerHTML = '';
+                    setTimeout(() => {
+                        successMessage.style.display = 'none';
+                    }, 3000);
+                } else {
+                    const error = await response.json();
+                    alert('Fehler: ' + (error.detail || 'Etwas ist schief gelaufen'));
+                }
+            } catch (err) {
+                alert('Fehler beim Senden: ' + err.message);
+            } finally {
+                loading.style.display = 'none';
+                submitBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>

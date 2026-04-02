@@ -1,0 +1,29 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Dashboard (lokal)",
+      "runtimeExecutable": "uvicorn",
+      "runtimeArgs": ["web.app:app", "--host", "127.0.0.1", "--port", "8080", "--reload"],
+      "port": 8080
+    },
+    {
+      "name": "Worker (Post-Job)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["worker.py", "--post"],
+      "port": null
+    },
+    {
+      "name": "Worker (Collect + Post)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["worker.py", "--all"],
+      "port": null
+    },
+    {
+      "name": "Telegram Bot (Polling)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["telegram_bot.py"],
+      "port": null
+    }
+  ]
+}
