@@ -21,6 +21,7 @@ from googleapiclient.errors import HttpError
 
 from config import (
     EMAIL_ATTACHMENT_STORAGE_PATH,
+    FORM_URL,
     GMAIL_ADDRESS,
     GOOGLE_CREDENTIALS_FILE,
     GOOGLE_TOKEN_FILE,
@@ -309,6 +310,56 @@ class EmailHandler:
         except IOError as error:
             logger.error(f"❌ Datei-Fehler: {error}")
             return None
+
+    def send_form_suggestion_email(self, recipient_email: str, subject: str = None) -> bool:
+        """
+        Auto-Response bei unvollständiger Email:
+        Schickt Link zum Google Form damit Nutzer die fehlenden Infos nachtragt.
+        """
+        if not self.service:
+            logger.warning("Email-Service nicht authentifiziert; Auto-Response konnte nicht gesendet werden")
+            return False
+
+        try:
+            subject = subject or "Vielen Dank für deine Event-Einreichung!"
+            body = f"""Vielen Dank für deine Event-Einreichung!
+
+Wir haben deine Email erhalten, konnten aber nicht alle Informationen automatisch erfassen.
+Um sicherzustellen, dass dein Event richtig auf unseren Kanälen gezeigt wird,
+bitten wir dich um ein paar Zusatzangaben:
+
+📋 Bitte fülle unseren Event-Katalog hier aus:
+{FORM_URL}
+
+Mit wenigen Klicks können wir dein Event dann direkt veröffentlichen!
+
+Danke für deine Unterstützung! 🎉
+
+---
+Südheide Veranstaltungen
+"""
+
+            message = MIMEText(body, "plain", "utf-8")
+            message["to"] = recipient_email
+            message["from"] = self.user_email or "noreply@gmail.com"
+            message["subject"] = subject
+
+            raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+
+            self.service.users().messages().send(
+                userId="me",
+                body={"raw": raw_message}
+            ).execute()
+
+            logger.info(f"✅ Auto-Response gesendet an: {recipient_email}")
+            return True
+
+        except HttpError as error:
+            logger.error(f"❌ Auto-Response Fehler: {error}")
+            return False
+        except Exception as error:
+            logger.error(f"❌ Unerwarteter Fehler bei Auto-Response: {error}")
+            return False
 
 
 email_handler = EmailHandler()

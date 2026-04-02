@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from claude_handler import claude_handler
-from config import DASHBOARD_PASSWORD, DASHBOARD_USER, EMAIL_ATTACHMENT_STORAGE_PATH
+from config import DASHBOARD_PASSWORD, DASHBOARD_USER, EMAIL_ATTACHMENT_STORAGE_PATH, GOOGLE_FORM_URL
 from database import db
 from dm_handler import create_dm_router
 from web.email_approval_dashboard import router as email_router
@@ -252,3 +252,12 @@ async def action_post_ready(
     if ready:
         meta_poster.batch_post(ready, platforms=["instagram", "facebook"])
     return RedirectResponse(url="/", status_code=303)
+
+
+@app.get("/form/redirect", response_class=RedirectResponse)
+async def form_redirect():
+    """
+    Bio-Link Redirect: öffentlich zugänglich (kein Auth).
+    Nutzer klickt Insta/FB Bio → /form/redirect → Google Form.
+    """
+    return RedirectResponse(url=GOOGLE_FORM_URL, status_code=307)

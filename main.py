@@ -24,6 +24,7 @@ from config import (
     EMAIL_SCREENING_ENABLED,
     EMAIL_SENDER_PATTERNS,
     GOOGLE_CREDENTIALS_FILE,
+    GOOGLE_FORM_SPREADSHEET_ID,
     MOCK_MODE,
     SCRAPERS_ENABLED,
     email_screener,
@@ -32,6 +33,7 @@ from config import (
 from database import db
 from deduplication import deduplicator
 from email_handler import email_handler
+from google_form_handler import google_form_handler
 from meta_poster import meta_poster
 from scrapers import collect_all_events
 from gcal_sync import gcal_sync
@@ -101,10 +103,9 @@ async def collect_and_approve_flow() -> None:
                                 emails_for_telegram.append(payload)
 
                         # 4. Genau eine Telegram-Nachricht mit Mail-Übersicht + Batch-Buttons
-                        if (
-                            emails_for_telegram
-                            and not MOCK_MODE
-                            and not getattr(telegram_bot, "disabled", False)
+                        # (auch bei MOCK_MODE: Freigabe per Telegram; Meta bleibt separat gemockt.)
+                        if emails_for_telegram and not getattr(
+                            telegram_bot, "disabled", False
                         ):
                             await telegram_bot.send_daily_email_digest(
                                 emails_for_telegram, ingest_batch_hex
@@ -158,6 +159,9 @@ async def collect_and_approve_flow() -> None:
 
     # Approved Emails → Claude → Events (separater Schritt nach dem try/finally)
     await process_approved_email_submissions()
+
+    # Google Form Responses → Claude → Events
+    await process_google_form_submissions()
 
 
 async def process_approved_email_submissions() -> None:
@@ -320,6 +324,98 @@ async def process_approved_email_submissions() -> None:
 
     except Exception as e:
         logger.exception(f"❌ process_approved_email_submissions Fehler: {e}")
+    finally:
+        if own_connection:
+            db.close()
+
+
+async def process_google_form_submissions() -> None:
+    """
+    Verarbeitet neue Google Form Responses:
+    1. Sheets API polling → neue Responses lesen
+    2. Parsen → Event-Dict
+    3. Claude: Post-Text generieren
+    4. DB: Event speichern
+    5. Telegram: "Neue Form-Einreichung"
+    """
+    if not GOOGLE_FORM_SPREADSHEET_ID:
+        logger.debug("GOOGLE_FORM_SPREADSHEET_ID nicht gesetzt; Google Forms deaktiviert")
+        return
+
+    logger.info("📋 Verarbeite Google Form Responses…")
+    own_connection = False
+    try:
+        if db.conn is None:
+            db.connect()
+            own_connection = True
+
+        # Authentifiziere Google Sheets
+        if os.path.exists(GOOGLE_CREDENTIALS_FILE):
+            google_form_handler.authenticate()
+
+        # Lese neue Responses
+        form_events = google_form_handler.get_new_responses()
+        if not form_events:
+            logger.info("📋 Keine neuen Google Form Responses")
+            return
+
+        logger.info(f"📋 {len(form_events)} neue Form-Responses → Claude")
+
+        for event in form_events:
+            try:
+                # Deduplizierung
+                if deduplicator.is_duplicate(event):
+                    logger.info(f"⏭️ Event '{event['title']}' ist Duplikat; übersprungen")
+                    continue
+
+                # Claude: Post-Text
+                post_text = claude_handler.generate_post_text(event)
+
+                # DB: Event speichern
+                event_id = db.add_event(
+                    source=event["source"],
+                    source_id=event["source_id"],
+                    title=event["title"],
+                    description=event["description"],
+                    image_url=event.get("image_url", ""),
+                    event_date=event["event_date"],
+                    location=event["location"],
+                    city=event["city"],
+                    price_min=event.get("price_min"),
+                    price_max=event.get("price_max"),
+                    url=event.get("url", ""),
+                    post_text=post_text,
+                    contact_email=event.get("contact_email"),
+                )
+
+                if event_id:
+                    logger.info(
+                        f"✅ Form-Event gespeichert: '{event['title']}' "
+                        f"(ID: {event_id}, Contact: {event.get('contact_email')})"
+                    )
+
+                    # Telegram: Benachrichtigung
+                    await telegram_bot.send_message(
+                        f"📋 *Neue Form-Einreichung*\n\n"
+                        f"*{event['title']}*\n"
+                        f"📅 {event['event_date']}\n"
+                        f"📍 {event['location']}, {event['city']}\n"
+                        f"👤 Kontakt: {event.get('contact_email', 'keine')}\n\n"
+                        f"Überprüfe im Dashboard: /action/{event_id}/approve"
+                    )
+                else:
+                    logger.warning(
+                        f"⚠️ Form-Event konnte nicht gespeichert werden: "
+                        f"'{event['title']}' (möglicherweise Duplikat)"
+                    )
+
+            except Exception as e:
+                logger.error(f"❌ Fehler bei Form-Event '{event.get('title')}': {e}")
+
+        logger.info("✅ Google Form-Verarbeitung abgeschlossen")
+
+    except Exception as e:
+        logger.exception(f"❌ process_google_form_submissions Fehler: {e}")
     finally:
         if own_connection:
             db.close()

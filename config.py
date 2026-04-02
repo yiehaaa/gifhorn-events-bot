@@ -24,13 +24,23 @@ DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL")
 if not DATABASE_URL and not MOCK_MODE:
     assert DATABASE_URL, "DATABASE_URL nicht in .env gesetzt"
 
-SQLITE_PATH: str = os.getenv("SQLITE_PATH", "events.sqlite3")
+# SQLite immer relativ zum Repo-Root (Ordner von config.py), nicht zum CWD —
+# sonst findet `telegram_bot.py` andere/leere DB als `worker.py` / `main.py`.
+_repo_root = Path(__file__).resolve().parent
+_sqlite_raw = os.getenv("SQLITE_PATH", "events.sqlite3")
+_sqlite_path = Path(_sqlite_raw)
+SQLITE_PATH: str = str(
+    _sqlite_path if _sqlite_path.is_absolute() else (_repo_root / _sqlite_path)
+)
 
 # ==================== CLAUDE API ====================
 CLAUDE_API_KEY: Optional[str] = os.getenv("CLAUDE_API_KEY")
-if not MOCK_MODE:
-    assert CLAUDE_API_KEY, "CLAUDE_API_KEY nicht in .env gesetzt"
+# Flyer-first: Live ohne Claude möglich (Caption aus Betreff/Text; siehe EMAIL_FLYER_USE_CLAUDE_CAPTION).
 CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+# Wenn 1: E-Mail-Flyer-Caption per Claude (Vision); sonst nur einfacher Fallback-Text.
+EMAIL_FLYER_USE_CLAUDE_CAPTION: bool = (
+    os.getenv("EMAIL_FLYER_USE_CLAUDE_CAPTION", "0").strip() == "1"
+)
 
 # ==================== TELEGRAM ====================
 TELEGRAM_BOT_TOKEN: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -47,10 +57,19 @@ META_API_VERSION: str = os.getenv("META_API_VERSION", "v18.0")
 if not MOCK_MODE:
     assert META_ACCESS_TOKEN, "META_ACCESS_TOKEN nicht in .env gesetzt"
 
-# ==================== GOOGLE (Gmail + Calendar) ====================
+# ==================== GOOGLE (Gmail + Calendar + Forms) ====================
 GOOGLE_CREDENTIALS_FILE: str = os.getenv("GOOGLE_CREDENTIALS_FILE", "client_secret.json")
 GOOGLE_TOKEN_FILE: str = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
 GMAIL_ADDRESS: Optional[str] = os.getenv("GMAIL_ADDRESS")  # Bot's Gmail Adresse
+
+# Google Forms + Sheets für Event-Datenerfassung
+# Polling: einmal täglich (19:00 mit collect_and_approve_flow)
+GOOGLE_FORM_SPREADSHEET_ID: Optional[str] = os.getenv("GOOGLE_FORM_SPREADSHEET_ID")
+GOOGLE_FORM_SHEET_NAME: str = os.getenv("GOOGLE_FORM_SHEET_NAME", "Form Responses 1")
+GOOGLE_FORM_URL: str = os.getenv(
+    "GOOGLE_FORM_URL",
+    "https://docs.google.com/forms/d/FORM_ID/viewform"
+)  # Wird als Bio-Link verwendet
 
 # ==================== EMAIL SCREENING ====================
 EMAIL_SCREENING_ENABLED: bool = os.getenv("EMAIL_SCREENING_ENABLED", "1").strip() == "1"
@@ -142,6 +161,67 @@ ERROR_WEBHOOK: Optional[str] = os.getenv("ERROR_WEBHOOK")  # Optional: Sentry/Cu
 # Web-Dashboard (FastAPI, nur für dich – HTTP Basic Auth)
 DASHBOARD_USER: str = os.getenv("DASHBOARD_USER", "admin")
 DASHBOARD_PASSWORD: Optional[str] = os.getenv("DASHBOARD_PASSWORD")
+
+# ==================== EVENT FORM (Fragekatalog für Veranstalter) ====================
+FORM_URL: str = os.getenv("FORM_URL", "http://localhost:8000/form/new-event")
+DASHBOARD_URL: str = os.getenv("DASHBOARD_URL", "http://localhost:8000")
+
+EVENT_FORM_QUESTIONS: list[dict] = [
+    {
+        "id": "title",
+        "label": "Veranstaltungstitel",
+        "type": "text",
+        "placeholder": "z.B. Konzert, Vortrag, Ausstellung",
+        "required": True,
+    },
+    {
+        "id": "event_date",
+        "label": "Datum & Uhrzeit",
+        "type": "datetime-local",
+        "required": True,
+    },
+    {
+        "id": "location",
+        "label": "Veranstaltungsort (Ort/Adresse)",
+        "type": "text",
+        "placeholder": "z.B. Stadthalle Gifhorn, Schulstraße 5",
+        "required": True,
+    },
+    {
+        "id": "city",
+        "label": "Stadt",
+        "type": "select",
+        "options": ["Gifhorn", "Wolfsburg", "Braunschweig", "Umliegend"],
+        "required": True,
+    },
+    {
+        "id": "description",
+        "label": "Beschreibung",
+        "type": "textarea",
+        "placeholder": "Worum geht es? Was sollten Besucher wissen?",
+        "required": False,
+    },
+    {
+        "id": "price",
+        "label": "Eintritt (€) — Wenn kostenlos, bitte 0 eingeben",
+        "type": "number",
+        "min": 0,
+        "required": False,
+    },
+    {
+        "id": "url",
+        "label": "Link zu mehr Informationen (optional)",
+        "type": "url",
+        "placeholder": "https://example.com/event",
+        "required": False,
+    },
+    {
+        "id": "contact_email",
+        "label": "Deine Email (für Rückfragen)",
+        "type": "email",
+        "required": True,
+    },
+]
 
 # Phase 2 – Datenquellen
 TICKETMASTER_API_KEY: Optional[str] = os.getenv("TICKETMASTER_API_KEY")

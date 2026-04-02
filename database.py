@@ -218,6 +218,12 @@ class Database:
                     ADD COLUMN IF NOT EXISTS evening_preview_sent BOOLEAN DEFAULT FALSE
                     """
                 )
+                cur.execute(
+                    """
+                    ALTER TABLE events
+                    ADD COLUMN IF NOT EXISTS contact_email VARCHAR(255)
+                    """
+                )
 
             self.conn.commit()
             logger.info("Tabellen erstellt/überprüft (Postgres)")
@@ -248,6 +254,7 @@ class Database:
                   canonical_id INTEGER,
                   approved_for_social INTEGER DEFAULT 0,
                   telegram_rejected INTEGER DEFAULT 0,
+                  contact_email TEXT,
                   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                   updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
@@ -318,6 +325,7 @@ class Database:
             for _alter in (
                 "ALTER TABLE email_submissions ADD COLUMN ingest_batch_id TEXT",
                 "ALTER TABLE events ADD COLUMN evening_preview_sent INTEGER DEFAULT 0",
+                "ALTER TABLE events ADD COLUMN contact_email TEXT",
             ):
                 try:
                     self.conn.execute(_alter)
@@ -339,6 +347,7 @@ class Database:
         price_max: Optional[float] = None,
         url: Optional[str] = None,
         post_text: Optional[str] = None,
+        contact_email: Optional[str] = None,
     ) -> Optional[int]:
         self._ensure_conn()
 
@@ -354,8 +363,8 @@ class Database:
                         """
                         INSERT INTO events
                         (source, source_id, title, description, image_url,
-                         event_date, location, city, price_min, price_max, url, post_text, created_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                         event_date, location, city, price_min, price_max, url, post_text, contact_email, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                         RETURNING id
                         """,
                         (
@@ -371,6 +380,7 @@ class Database:
                             price_max,
                             url,
                             post_text,
+                            contact_email,
                         ),
                     )
                     row = cur.fetchone()
@@ -388,8 +398,8 @@ class Database:
                     """
                     INSERT INTO events
                     (source, source_id, title, description, image_url,
-                     event_date, location, city, price_min, price_max, url, post_text, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                     event_date, location, city, price_min, price_max, url, post_text, contact_email, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
                     (
                         source,
@@ -404,6 +414,7 @@ class Database:
                         price_max,
                         url,
                         post_text,
+                        contact_email,
                     ),
                 )
                 return int(cur.lastrowid)

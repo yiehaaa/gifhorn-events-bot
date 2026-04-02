@@ -13,7 +13,7 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from claude_handler import claude_handler
-from config import MOCK_MODE, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 from database import db
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 class TelegramBot:
     def __init__(self) -> None:
-        self.disabled = MOCK_MODE or (not TELEGRAM_BOT_TOKEN) or (not TELEGRAM_CHAT_ID)
+        # MOCK_MODE blockiert Meta/Claude-Pflichtkeys, nicht den Telegram-Freigabe-Chat.
+        self.disabled = (not TELEGRAM_BOT_TOKEN) or (not TELEGRAM_CHAT_ID)
         self.bot_token = TELEGRAM_BOT_TOKEN
         self.chat_id = int(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else None
 
@@ -44,7 +45,7 @@ class TelegramBot:
         batch_hex: 32 Zeichen (uuid.hex), steht in DB ingest_batch_id.
         """
         if self.disabled:
-            logger.info("Telegram ist deaktiviert (MOCK_MODE oder Keys fehlen).")
+            logger.info("Telegram ist deaktiviert (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID fehlen).")
             return
         if not emails or len(batch_hex) != 32:
             logger.info("Keine neuen Email-Submissions für Telegram-Digest")
@@ -190,7 +191,7 @@ class TelegramBot:
     async def send_events_for_approval(self, events: List[Dict[str, Any]]) -> None:
         """Sendet einen Batch zur Freigabe (z. B. aus dem Cron / main)."""
         if self.disabled:
-            logger.info("Telegram ist deaktiviert (MOCK_MODE oder Keys fehlen).")
+            logger.info("Telegram ist deaktiviert (TELEGRAM_* fehlen).")
             return
         if not events:
             logger.info("Keine neuen Events für Telegram")
@@ -248,39 +249,64 @@ class TelegramBot:
         """
         Callback-Handler für beide:
         - approve_* / reject_* (Events)
-        - email_approve_* / email_reject_* (Emails)
+        - email_bok_* / emspam_* (Mail-Digest)
         """
         query = update.callback_query
-        if not query or not query.data:
+        if not query:
             return
 
-        data = query.data or ""
-        # Einzelne Mail als Spam (vor „Alle übrigen freigeben“)
-        if data.startswith("emspam_"):
-            try:
-                sub_id = int(data[7:])
-            except ValueError:
-                await query.answer("Ungültig.", show_alert=True)
+        data = (query.data or "").strip()
+        if not data:
+            await query.answer("Leere Auswahl.", show_alert=True)
+            return
+
+        callback_answered = False
+        try:
+            # Einzelne Mail als Spam (vor „Alle übrigen freigeben“)
+            if data.startswith("emspam_"):
+                try:
+                    sub_id = int(data[7:])
+                except ValueError:
+                    await query.answer("Ungültig.", show_alert=True)
+                    return
+                await self._handle_single_email_spam_reject(sub_id, query)
                 return
-            await self._handle_single_email_spam_reject(sub_id, query)
-            return
 
-        await query.answer()
+            # Loading sofort beenden (sonst bleibt „Lädt…“ hängen)
+            await query.answer()
+            callback_answered = True
 
-        # Alle noch pending Mails dieser Batch freigeben (ohne zuvor ❌ Spam)
-        if data.startswith("email_bok_") and len(data) == 42:
-            await self._handle_email_batch_confirm(data[10:], query)
-            return
+            # Alle noch pending Mails dieser Batch freigeben
+            if data.startswith("email_bok_"):
+                batch_hex = data[len("email_bok_") :]
+                if len(batch_hex) == 32:
+                    await self._handle_email_batch_confirm(batch_hex, query)
+                else:
+                    await query.edit_message_text(
+                        text=f"❌ Ungültige Batch-ID (Länge {len(batch_hex)}, erwartet 32)."
+                    )
+                return
 
-        # Parse callback_data: "approve_123" / "reject_123"
-        parts = data.rsplit("_", 1)
-        if len(parts) != 2:
-            return
+            # Parse callback_data: "approve_123" / "reject_123"
+            parts = data.rsplit("_", 1)
+            if len(parts) != 2:
+                logger.warning("Unbekannter Callback: %s", data[:80])
+                return
 
-        action_with_type = parts[0]
-        sid = parts[1]
+            action_with_type = parts[0]
+            sid = parts[1]
 
-        await self._handle_event_callback(action_with_type, sid, query)
+            await self._handle_event_callback(action_with_type, sid, query)
+        except Exception:
+            logger.exception("Telegram on_callback data=%r", data[:100])
+            if not callback_answered:
+                try:
+                    await query.answer(
+                        "Interner Fehler — Bot-Log prüfen, Bot neu starten.",
+                        show_alert=True,
+                    )
+                except Exception:
+                    pass
 
     async def _handle_event_callback(
         self, action: str, sid: str, query: Any
@@ -338,6 +364,21 @@ class TelegramBot:
             db.connect()
 
         n = db.approve_email_submissions_by_batch(batch_hex, approved_by="telegram")
+        if n == 0:
+            logger.warning(
+                "Batch-Freigabe: 0 Zeilen (falsche DB oder Batch schon erledigt?). batch=%s…",
+                batch_hex[:8],
+            )
+            await query.edit_message_text(
+                text=(
+                    "⚠️ Keine pending Mails in der Datenbank für diesen Batch.\n\n"
+                    "Typisch: `telegram_bot.py` und `worker.py` müssen dieselbe SQLite-Datei "
+                    "nutzen (ab jetzt: Pfad fest zum Repo-Root). "
+                    "Bot neu starten und nochmal „Freigeben“ — oder Batch erneut per Collect erzeugen."
+                )
+            )
+            return
+
         await query.edit_message_text(
             text=f"✅ {n} Mail(s) freigegeben (alle, die du nicht mit ❌ verworfen hast). "
             "KI läuft jetzt — um 21 Uhr die Beitrags-Vorschau per Cron."
@@ -362,13 +403,9 @@ class TelegramBot:
         if self.disabled:
             return
         application.add_handler(CommandHandler("start", self.start))
-        # Handler für Event-Callbacks: approve_ID, reject_ID
-        application.add_handler(
-            CallbackQueryHandler(
-                self.on_callback,
-                pattern=r"^(approve|reject)_\d+$|^email_bok_[a-fA-F0-9]{32}$|^emspam_\d+$",
-            )
-        )
+        # Kein Regex-Filter: In PTB 21 kann ein zu strenges Pattern Callbacks verwerfen
+        # → Telegram zeigt endlos „Lädt…“, weil answer() nie aufgerufen wird.
+        application.add_handler(CallbackQueryHandler(self.on_callback))
 
 
 telegram_bot = TelegramBot()
@@ -377,7 +414,7 @@ telegram_bot = TelegramBot()
 def run_polling() -> None:
     """Separater Prozess: empfängt Button-Klicks (Polling)."""
     if telegram_bot.disabled:
-        logger.info("Telegram Polling abgebrochen: Telegram ist deaktiviert (MOCK_MODE/Keys fehlend).")
+        logger.info("Telegram Polling abgebrochen: Telegram ist deaktiviert (TELEGRAM_* fehlen).")
         return
     logging.basicConfig(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",

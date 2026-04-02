@@ -17,6 +17,7 @@ from config import (
     CLAUDE_API_KEY,
     CLAUDE_MODEL,
     CLAUDE_POST_TEMPLATE,
+    EMAIL_FLYER_USE_CLAUDE_CAPTION,
     MOCK_MODE,
     INSTAGRAM_HASHTAGS,
 )
@@ -194,7 +195,12 @@ class ClaudeHandler:
             f"{INSTAGRAM_HASHTAGS}"
         )
 
-        if self.client is None or MOCK_MODE:
+        # Standard: nur Flyer posten, Caption aus Mail — ohne Claude (nächster Schritt: API).
+        if (
+            not EMAIL_FLYER_USE_CLAUDE_CAPTION
+            or self.client is None
+            or MOCK_MODE
+        ):
             return fallback
 
         content = []
