@@ -71,6 +71,20 @@ Siehe `railway.json` (Standard: `python worker.py --post`).
 - `MOCK_MODE=1`
 - `SCRAPERS_ENABLED=0`
 
+### Neues PostgreSQL (alter Service crashed / neuer Plugin)
+
+Im **Repo steht keine feste DB-URL** — nur die Variable `DATABASE_URL` (siehe `config.py`). Nach einer **neuen** Railway-Postgres-Instanz:
+
+1. Railway → **neuer Postgres**-Service → **Variables** (oder Connect) → `DATABASE_URL` kopieren (**private** `*.railway.internal` für Worker/Dashboard im selben Projekt).
+2. Dieselbe URL auf **`gifhorn-worker`** und **`gifhorn-dashboard`** setzen (beide müssen identisch sein).
+3. Per CLI (im Repo, `railway link` gesetzt):
+
+```bash
+DATABASE_URL='postgresql://…' ./scripts/sync_railway_database_url.sh
+```
+
+Schema/Migration: App legt Tabellen bei erstem Connect an (`create_tables`). Alte Daten ggf. mit `pg_dump` / `pg_restore` oder Railway-Backup übernehmen.
+
 ### Cron Schedule
 Railway Cron nutzt UTC.
 
