@@ -4,7 +4,6 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python worker.py --post",
     "restartPolicyType": "ON_FAILURE"
   }
 }

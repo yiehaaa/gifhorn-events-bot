@@ -4,3 +4,8 @@
 cmds = [
   "python -m venv --copies /opt/venv && . /opt/venv/bin/activate && pip install -r requirements.txt && python -m playwright install --with-deps chromium"
 ]
+
+# Standard-Start (gifhorn-worker). Dashboard + Telegram überschreiben per Railway-Variable
+# NIXPACKS_START_CMD (siehe Docs), weil alle Services dasselbe Repo nutzen — nicht railway.json pro Service.
+[start]
+cmd = "python worker.py --post"
