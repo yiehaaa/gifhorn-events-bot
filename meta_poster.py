@@ -129,8 +129,9 @@ class MetaPoster:
                 "message": post_text,
                 "access_token": self.access_token,
             }
-            if event.get("url"):
-                fb_data["link"] = event["url"]
+            event_url = str(event.get("url") or "").strip()
+            if event_url.startswith(("http://", "https://")):
+                fb_data["link"] = event_url
             if image_url:
                 if not image_url.startswith(("http://", "https://")):
                     logger.warning(
@@ -140,6 +141,9 @@ class MetaPoster:
                     )
                 else:
                     fb_data["picture"] = image_url
+                    # Graph API (#100): Mit picture muss link gesetzt sein — sonst Fehler.
+                    if "link" not in fb_data:
+                        fb_data["link"] = image_url
 
             response = requests.post(fb_url, data=fb_data, timeout=60)
             result = response.json()

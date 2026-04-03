@@ -86,6 +86,13 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Gifhorn Events Dashboard", lifespan=lifespan)
 
+
+@app.get("/healthz")
+async def healthz() -> dict[str, str]:
+    """Kein DB/Auth — nur Prozess-lebt (Railway 502 vs. DB-Timeout eingrenzen)."""
+    return {"status": "ok"}
+
+
 # Öffentliche Flyer für Meta image_url (PUBLIC_IMAGE_BASE_URL …/flyers/Dateiname)
 _flyers_root = Path(EMAIL_ATTACHMENT_STORAGE_PATH)
 try:
