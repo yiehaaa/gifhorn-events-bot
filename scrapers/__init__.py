@@ -13,12 +13,16 @@ logger = logging.getLogger(__name__)
 def collect_all_events() -> List[Dict[str, Any]]:
     """Alle konfigurierten Quellen; Fehler pro Quelle isoliert."""
     from scrapers.eventim import eventim_scraper
+    from scrapers.kurt_gifhorn import kurt_scraper
+    from scrapers.stadt_gifhorn import stadt_gifhorn_scraper
     from scrapers.stadthalle import stadthalle_scraper
     from scrapers.suedheide import suedheide_scraper
     from scrapers.ticketmaster import ticketmaster_scraper
     from scrapers.usk_ical import usk_ical_scraper
 
     sources: List[tuple[str, Callable[[], List[Dict[str, Any]]]]] = [
+        ("kurt_gifhorn", kurt_scraper.get_events),
+        ("stadt_gifhorn", stadt_gifhorn_scraper.get_events),
         ("suedheide", suedheide_scraper.get_events),
         ("stadthalle", stadthalle_scraper.get_events),
         ("usk_ical", usk_ical_scraper.get_events),
