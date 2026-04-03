@@ -137,6 +137,29 @@ async def _run_email_screening_digest_to_telegram(flow_name: str) -> int:
     return digest_count
 
 
+async def notify_telegram_first_round_for_new_events(event_ids: List[int]) -> int:
+    """
+    Nach Mail→Event: dieselbe Telegram-Runde wie beim Portal-Collect
+    (Menü „Events zur Revision“ / send_events_for_approval).
+    """
+    if not event_ids or getattr(telegram_bot, "disabled", False):
+        return 0
+    to_send: List[Dict[str, Any]] = []
+    for eid in event_ids:
+        row = db.get_event_by_id(eid)
+        if not row or row.get("posted_at"):
+            continue
+        if row.get("telegram_rejected") in (True, 1):
+            continue
+        if row.get("approved_for_social") in (True, 1):
+            continue
+        to_send.append(row)
+    if not to_send:
+        return 0
+    await telegram_bot.send_events_for_approval(to_send)
+    return len(to_send)
+
+
 async def run_manual_email_flyer_collect() -> str:
     """
     Nur E-Mail-/Flyer-Pipeline wie im 19-Uhr-Collect (ohne Portal-Scraper, ohne neue Portal-Events).
@@ -169,18 +192,32 @@ async def run_manual_email_flyer_collect() -> str:
         n = await _run_email_screening_digest_to_telegram(
             flow_name="run_manual_email_flyer_collect"
         )
-        await process_approved_email_submissions()
-
-        if n > 0:
-            return (
-                f"✅ E-Mail-/Flyer-Abruf: Digest mit {n} Mail(s) an Telegram gesendet "
-                "(wie 19-Uhr-Lauf). Bereits freigegebene Mails wurden nachverarbeitet."
-            )
-        return (
-            "✅ Abruf fertig: keine neuen relevanten Mails für einen Digest "
-            "(ungelesen in Gmail, aber Screening/DB). "
-            "Freigegebene Mails wurden ggf. nachverarbeitet."
+        converted = await process_approved_email_submissions(
+            manual_revision_after_convert=True
         )
+        sent_rev = await notify_telegram_first_round_for_new_events(converted)
+
+        lines: List[str] = ["✅ E-Mail-/Flyer-Abruf fertig."]
+        if n > 0:
+            lines.append(
+                f"📬 Digest: {n} Mail(s) — Spam pro Zeile ❌, dann „Alle übrigen freigeben“."
+            )
+        if converted:
+            lines.append(
+                f"📧 {len(converted)} freigegebene Mail(s) → Event(s) in der DB (ohne Auto-Post)."
+            )
+        if sent_rev > 0:
+            lines.append(
+                f"🎪 {sent_rev} Event(s) als „Neue Events zur Freigabe“ geschickt (gleiche Runde wie Portal/Menü)."
+            )
+        elif converted and getattr(telegram_bot, "disabled", False):
+            lines.append("ℹ️ Telegram aus — Freigabe nur im Dashboard.")
+        if n == 0 and not converted:
+            lines.append(
+                "Kein neuer Digest (keine passenden ungelesenen Mails). "
+                "Freigegebene Mails wurden ggf. zu Events + Revision verarbeitet."
+            )
+        return "\n".join(lines)
     except Exception as e:
         logger.exception("run_manual_email_flyer_collect")
         return f"❌ Fehler: {e}"
@@ -266,15 +303,24 @@ async def collect_and_approve_flow() -> None:
     await process_approved_email_submissions()
 
 
-async def process_approved_email_submissions() -> None:
+async def process_approved_email_submissions(
+    *, manual_revision_after_convert: bool = False
+) -> List[int]:
     """
     Verarbeitet freigegebene Email-Submissions:
     1. Anhänge zu Railway Storage speichern
     2. Claude: Post-Text + Bild-Analyse
     3. Als Event in DB speichern
-    4. Telegram: Post-Entwurf zur finalen Freigabe senden
+    4. Optional: Auto-Freigabe / Meta (Cron)
+
+    Bei manual_revision_after_convert=True (manueller Telegram-Mail-Abruf): keine
+    Auto-Freigabe/Meta — Events bleiben für „Events zur Freigabe“ wie Portal-Events.
+
+    Returns:
+        Neu angelegte Event-IDs (Reihenfolge der Verarbeitung).
     """
     logger.info("📧 Verarbeite freigegebene Email-Submissions…")
+    converted_event_ids: List[int] = []
     own_connection = False
     try:
         if db.conn is None:
@@ -284,7 +330,7 @@ async def process_approved_email_submissions() -> None:
 
         if not approved_emails:
             logger.info("📧 Keine freigegebenen Emails zur Verarbeitung")
-            return
+            return converted_event_ids
 
         logger.info(f"📧 {len(approved_emails)} freigegebene Emails → Claude")
 
@@ -380,11 +426,14 @@ async def process_approved_email_submissions() -> None:
                 if event_id:
                     db.link_email_to_event(email["id"], event_id)
                     logger.info(f"📧 Email {email['id']} → Event {event_id} konvertiert")
+                    converted_event_ids.append(int(event_id))
 
                     auto_approve = (
                         AUTO_APPROVE_SOCIAL_FOR_EMAIL_SUBMISSIONS
                         or AUTO_POST_AFTER_EMAIL_CONVERSION
                     )
+                    if manual_revision_after_convert:
+                        auto_approve = False
 
                     if auto_approve:
                         db.set_telegram_approval(event_id, approved=True)
@@ -394,7 +443,8 @@ async def process_approved_email_submissions() -> None:
                         )
 
                     if (
-                        AUTO_POST_AFTER_EMAIL_CONVERSION
+                        not manual_revision_after_convert
+                        and AUTO_POST_AFTER_EMAIL_CONVERSION
                         and image_url
                         and not str(image_url).startswith("http")
                     ):
@@ -407,7 +457,10 @@ async def process_approved_email_submissions() -> None:
 
                     # Standard: kein Telegram nach Mail→Event — Abend-Preview (--evening-preview).
 
-                    if AUTO_POST_AFTER_EMAIL_CONVERSION:
+                    if (
+                        not manual_revision_after_convert
+                        and AUTO_POST_AFTER_EMAIL_CONVERSION
+                    ):
                         ev = db.get_event_by_id(event_id)
                         if ev:
                             meta_poster.batch_post(
@@ -426,8 +479,11 @@ async def process_approved_email_submissions() -> None:
             except Exception as e:
                 logger.warning("GCal Sync fehlgeschlagen: %s", e)
 
+        return converted_event_ids
+
     except Exception as e:
         logger.exception(f"❌ process_approved_email_submissions Fehler: {e}")
+        return converted_event_ids
     finally:
         if own_connection:
             db.close()

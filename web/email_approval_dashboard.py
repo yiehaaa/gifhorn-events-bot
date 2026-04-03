@@ -23,11 +23,17 @@ router = APIRouter(prefix="/api/emails", tags=["email-submissions"])
 
 
 async def _kick_email_conversion_pipeline() -> None:
-    """Nach Web-Freigabe dieselbe Pipeline wie nach Telegram-Approve."""
+    """Nach Web-Freigabe: Mail→Event + erste Telegram-Freigabe wie nach Telegram-Batch."""
     try:
-        from main import process_approved_email_submissions
+        from main import (
+            notify_telegram_first_round_for_new_events,
+            process_approved_email_submissions,
+        )
 
-        await process_approved_email_submissions()
+        converted = await process_approved_email_submissions(
+            manual_revision_after_convert=True
+        )
+        await notify_telegram_first_round_for_new_events(converted)
     except Exception:
         logger.exception("Email-Konvertierung nach Dashboard-Freigabe fehlgeschlagen")
 

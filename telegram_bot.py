@@ -61,8 +61,9 @@ class TelegramBot:
             await update.message.reply_text(
                 "👋 Gifhorn Events Bot\n"
                 "Mail-Digest: Spam pro Zeile mit ❌ ablehnen, dann „Alle übrigen freigeben“.\n"
-                "Neue Mails aus Gmail: täglich ~19 Uhr (Cron) oder Menü „E-Mail-Flyer abrufen“ / /emailabruf.\n"
-                "KI-Beiträge: ~21 Uhr (Cron) freigeben.\n"
+                "Danach: Events wie vom Portal unter „Neue Events zur Freigabe“ (✅/❌).\n"
+                "Neue Mails: ~19 Uhr (Cron) oder Menü „E-Mail-Flyer abrufen“ / /emailabruf.\n"
+                "Abend: ~21 Uhr KI-Beitrags-Vorschau (Cron).\n"
                 "Läuft mit: python telegram_bot.py",
             )
             await update.message.reply_text(
@@ -828,8 +829,8 @@ class TelegramBot:
             return
 
         await query.edit_message_text(
-            text=f"✅ {n} Mail(s) freigegeben (alle, die du nicht mit ❌ verworfen hast). "
-            "KI läuft jetzt — um 21 Uhr die Beitrags-Vorschau per Cron."
+            text=f"✅ {n} Mail(s) freigegeben. KI erzeugt Events — gleich kommen sie als "
+            "„Neue Events zur Freigabe“ (wie Portal), danach 21-Uhr-Vorschau wie gewohnt."
         )
         logger.info("📧 Batch freigegeben: %s Mails (batch=%s…)", n, batch_hex[:8])
 
@@ -837,9 +838,15 @@ class TelegramBot:
 
             async def _run_conversion() -> None:
                 try:
-                    from main import process_approved_email_submissions
+                    from main import (
+                        notify_telegram_first_round_for_new_events,
+                        process_approved_email_submissions,
+                    )
 
-                    await process_approved_email_submissions()
+                    converted = await process_approved_email_submissions(
+                        manual_revision_after_convert=True
+                    )
+                    await notify_telegram_first_round_for_new_events(converted)
                 except Exception:
                     logger.exception(
                         "Email-Konvertierung nach Batch-Freigabe fehlgeschlagen"
