@@ -177,6 +177,67 @@
             display: none;
         }
 
+        /* Success-Modal (Popup) */
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.5);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            padding: 16px;
+        }
+
+        .modal-card {
+            background: #fff;
+            border-radius: 12px;
+            max-width: 540px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+            padding: 20px 20px 16px;
+        }
+
+        .modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+
+        .modal-header h2 {
+            font-size: 18px;
+            margin: 0;
+            color: #1f2d3d;
+        }
+
+        .modal-close {
+            border: none;
+            background: transparent;
+            font-size: 18px;
+            line-height: 1;
+            cursor: pointer;
+            padding: 6px 10px;
+            border-radius: 8px;
+        }
+
+        .modal-close:hover {
+            background: #f2f2f2;
+        }
+
+        .modal-content {
+            font-size: 14px;
+            color: #333;
+            line-height: 1.55;
+        }
+
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 14px;
+        }
+
         .loading {
             display: none;
             text-align: center;
@@ -194,8 +255,18 @@
         <h1>🎪 Südheide Veranstaltungen</h1>
         <p class="subtitle">Reiche dein Event ein — wir posten es auf Instagram & Facebook!</p>
 
-        <div class="success" id="successMessage">
-            ✅ Event erfolgreich eingereicht! Danke!
+        <!-- Success Popup (Modal) -->
+        <div class="modal-overlay" id="successModalOverlay" aria-hidden="true">
+            <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="successModalTitle">
+                <div class="modal-header">
+                    <h2 id="successModalTitle">Event angelegt</h2>
+                    <button type="button" class="modal-close" id="successModalClose" aria-label="Schließen">✕</button>
+                </div>
+                <div class="modal-content" id="successModalContent"></div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" id="successModalOk">Ok</button>
+                </div>
+            </div>
         </div>
 
         <form id="eventForm">
@@ -310,7 +381,38 @@
         const btnAllEqual = document.getElementById('btnAllEqual');
         const submitBtn = document.getElementById('submitBtn');
         const loading = document.getElementById('loading');
-        const successMessage = document.getElementById('successMessage');
+
+        const successModalOverlay = document.getElementById('successModalOverlay');
+        const successModalContent = document.getElementById('successModalContent');
+        const successModalClose = document.getElementById('successModalClose');
+        const successModalOk = document.getElementById('successModalOk');
+
+        function escapeHtml(str) {
+            return String(str ?? '')
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#039;');
+        }
+
+        function showSuccessModal(html) {
+            successModalContent.innerHTML = html;
+            successModalOverlay.style.display = 'flex';
+            successModalOverlay.setAttribute('aria-hidden', 'false');
+        }
+
+        function hideSuccessModal() {
+            successModalOverlay.style.display = 'none';
+            successModalOverlay.setAttribute('aria-hidden', 'true');
+        }
+
+        // Schließen per X oder Klick auf Overlay (wegklicken)
+        successModalClose.addEventListener('click', () => hideSuccessModal());
+        successModalOk.addEventListener('click', () => hideSuccessModal());
+        successModalOverlay.addEventListener('click', (e) => {
+            if (e.target === successModalOverlay) hideSuccessModal();
+        });
 
         // Berechne Tageanzahl und erstelle Uhrzeiten-Felder
         function updateTimeFields() {
@@ -390,8 +492,32 @@
         });
 
         // Event Listener
-        startDateInput.addEventListener('change', updateTimeFields);
-        endDateInput.addEventListener('change', updateTimeFields);
+        // UX: Wenn der Nutzer das Anfangsdatum setzt, soll das Enddatum standardmäßig
+        // automatisch auf denselben Tag gesetzt werden (damit die Tagesanzahl stimmt).
+        // Wenn der Nutzer das Enddatum bereits manuell geändert hat, respektieren wir das.
+        let endDateTouched = false;
+
+        startDateInput.addEventListener('change', () => {
+            // Wenn Enddatum noch nie manuell gesetzt wurde (oder leer) setzen wir es automatisch
+            // und verhinden damit die "end before start"-Fehlermeldung.
+            if (!endDateInput.value || !endDateTouched) {
+                endDateInput.value = startDateInput.value;
+            } else {
+                // Falls der Nutzer bereits ein späteres/anderes Enddatum gewählt hat, lassen wir es,
+                // aber wenn es vor dem Start liegt, korrigieren wir es.
+                const sd = new Date(startDateInput.value);
+                const ed = new Date(endDateInput.value);
+                if (!Number.isNaN(sd.getTime()) && !Number.isNaN(ed.getTime()) && ed < sd) {
+                    endDateInput.value = startDateInput.value;
+                }
+            }
+            updateTimeFields();
+        });
+
+        endDateInput.addEventListener('change', () => {
+            endDateTouched = true;
+            updateTimeFields();
+        });
 
         // Form Submit
         form.addEventListener('submit', async (e) => {
@@ -480,12 +606,27 @@
                 });
 
                 if (response.ok) {
-                    successMessage.style.display = 'block';
+                    // Antwort enthält im Erfolgsfall JSON: { status: "success", event_id: ... }
+                    let data = {};
+                    try { data = await response.json(); } catch (_) {}
+
+                    const eventId = data.event_id ?? '';
+                    const timeSummary = (times && times.length > 0)
+                        ? `${times[0].start}-${times[0].end}${times.length > 1 ? ` (+${times.length - 1} weitere Tage)` : ''}`
+                        : '';
+
+                    const overviewHtml = `
+                        <div>✅ Wir haben den Eintrag erfolgreich gespeichert.</div>
+                        <div style="margin-top:8px;"><b>${escapeHtml(title)}</b></div>
+                        <div>Datum: ${escapeHtml(startDate)} bis ${escapeHtml(endDate)}</div>
+                        <div>Ort: ${escapeHtml(locationStreet)} ${escapeHtml(locationZip)} ${escapeHtml(locationCity)}</div>
+                        ${timeSummary ? `<div>Zeit: ${escapeHtml(timeSummary)}</div>` : ''}
+                        ${eventId ? `<div>ID: ${escapeHtml(eventId)}</div>` : ''}
+                    `;
+
                     form.reset();
                     timeFieldsContainer.innerHTML = '';
-                    setTimeout(() => {
-                        successMessage.style.display = 'none';
-                    }, 3000);
+                    showSuccessModal(overviewHtml);
                 } else {
                     const error = await response.json();
                     alert('Fehler: ' + (error.detail || 'Etwas ist schief gelaufen'));

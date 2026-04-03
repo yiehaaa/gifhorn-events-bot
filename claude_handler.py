@@ -59,11 +59,12 @@ class ClaudeHandler:
 
     def generate_post_text(self, event: Dict[str, Any]) -> str:
         """Generiert Instagram-Post-Text für ein Event-Dict."""
+        price_label = self._format_price_for_prompt(event.get("price_min"), event.get("price_max"))
         event_details = f"""
         Titel: {event.get('title', 'N/A')}
         Datum: {event.get('event_date', 'N/A')}
         Ort: {event.get('location', 'N/A')} ({event.get('city', 'N/A')})
-        Preis: {event.get('price_min', '?')}–{event.get('price_max', '?')} €
+        Preis: {price_label}
         URL: {event.get('url', 'N/A')}
         Beschreibung: {event.get('description', '')}
         """
@@ -123,6 +124,28 @@ class ClaudeHandler:
             loc = event.get("location", "")
             url = event.get("url", "")
             return f"{title}\n📍 {loc}\n🎫 {url}"
+
+    @staticmethod
+    def _format_price_for_prompt(price_min: Any, price_max: Any) -> str:
+        def _to_float(value: Any) -> float | None:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        min_value = _to_float(price_min)
+        max_value = _to_float(price_max)
+        if (min_value in (None, 0.0)) and (max_value in (None, 0.0)):
+            return "Eintritt frei!"
+        if min_value is not None and max_value is not None:
+            return f"{min_value:g}–{max_value:g} €"
+        if min_value is not None:
+            return f"ab {min_value:g} €"
+        if max_value is not None:
+            return f"bis {max_value:g} €"
+        return "Eintritt frei!"
 
     def check_image_safety(self, image_url: str) -> Tuple[bool, str]:
         """Vision: (is_safe, reason)."""

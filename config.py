@@ -105,6 +105,14 @@ AUTO_POST_AFTER_EMAIL_CONVERSION: bool = (
 # https://dein-service.railway.app/flyers — für Meta image_url bei lokalem Speicherpfad
 PUBLIC_IMAGE_BASE_URL: Optional[str] = os.getenv("PUBLIC_IMAGE_BASE_URL") or None
 
+# ==================== FLYER RENDERING ====================
+# "html" = HTML/CSS + Playwright Screenshot (kostenlos/self-hosted)
+# "local" = Pillow-Generator als robuster Fallback
+FLYER_RENDER_PROVIDER: str = os.getenv("FLYER_RENDER_PROVIDER", "html").strip().lower()
+# Telegram-Bot ruft damit POST /internal/refresh-flyer/{id} auf dem Dashboard auf
+# (gleicher Secret auf gifhorn-dashboard + gifhorn-telegram-bot).
+REFRESH_FLYER_SECRET: Optional[str] = os.getenv("REFRESH_FLYER_SECRET") or None
+
 # ==================== GLOBALE KONSTANTEN ====================
 
 # Posting-Zeiten (Empfehlung Europe/Berlin — Uhrzeiten im Railway-Cron eintragen)
@@ -263,8 +271,13 @@ def public_image_url(stored: str) -> str:
     s = stored.strip()
     if s.startswith(("http://", "https://")):
         return s
-    base = (PUBLIC_IMAGE_BASE_URL or "").rstrip("/")
+    base = (PUBLIC_IMAGE_BASE_URL or "").strip().rstrip("/")
     if not base:
         return s
     name = Path(s).name
+    # Erlaube beide Varianten:
+    # - PUBLIC_IMAGE_BASE_URL=https://...            -> /flyers/{name}
+    # - PUBLIC_IMAGE_BASE_URL=https://.../flyers     -> /{name}
+    if base.endswith("/flyers"):
+        return f"{base}/{name}"
     return f"{base}/flyers/{name}"

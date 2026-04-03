@@ -12,15 +12,16 @@ from __future__ import annotations
 import logging
 import secrets
 import os
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, date, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import uuid
 import shutil
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, UploadFile, File
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -36,12 +37,12 @@ from config import (
     DASHBOARD_USER,
     EMAIL_ATTACHMENT_STORAGE_PATH,
     EMAIL_SCREENING_ENABLED,
-    GOOGLE_FORM_URL,
     META_ACCESS_TOKEN,
     MOCK_MODE,
     POSTING_TIME,
     POSTING_TIMEZONE,
     PUBLIC_IMAGE_BASE_URL,
+    REFRESH_FLYER_SECRET,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
 )
@@ -49,6 +50,7 @@ from database import db
 from dm_handler import create_dm_router
 from web.email_approval_dashboard import router as email_router
 from meta_poster import meta_poster
+from web.flyer_render import render_auto_flyer_png
 
 logger = logging.getLogger(__name__)
 
@@ -94,23 +96,158 @@ app.include_router(create_dm_router(), tags=["dm"])
 # Email Submission Approval API + Dashboard
 app.include_router(email_router)
 
+# Parallele erste Requests sonst doppeltes connect()/create_tables (Locks, Haenger).
+_db_init_lock = threading.Lock()
+
 
 def require_db() -> None:
     """Einmalig verbinden, wenn noch nicht geschehen."""
-    if db.conn is not None:
-        return
+    with _db_init_lock:
+        if db.conn is not None:
+            # Nach externen DB-Resets/Session-Kills kann ein Connection-Objekt
+            # noch existieren, aber intern bereits geschlossen sein.
+            # In dem Fall aktiv neu verbinden.
+            try:
+                # psycopg2: closed == 0 bedeutet offen
+                closed_flag = getattr(db.conn, "closed", 0)
+                if isinstance(closed_flag, int) and closed_flag != 0:
+                    db.conn = None
+                else:
+                    with db.conn.cursor() as cur:
+                        cur.execute("SELECT 1")
+                    return
+            except Exception:
+                db.conn = None
+        try:
+            db.connect()
+            db.create_tables()
+        except Exception as e:
+            logger.exception("Dashboard: DB-Verbindung fehlgeschlagen")
+            if db.conn is not None:
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
+                try:
+                    db.conn.close()
+                except Exception:
+                    pass
+                db.conn = None
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "PostgreSQL nicht erreichbar oder Migration blockiert (anderer Prozess "
+                    "haelt evtl. einen Lock). Pruefe DATABASE_URL, beende idle Transaktionen "
+                    "in Postgres, oder warte 60s und lade neu. "
+                    f"Technisch: {e!s}"
+                ),
+            ) from e
+
+
+def _event_datetime_from_row(ev: dict) -> datetime:
+    ed = ev.get("event_date")
+    if isinstance(ed, datetime):
+        return ed
+    if isinstance(ed, str):
+        try:
+            return datetime.fromisoformat(ed.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                return datetime.strptime(ed[:19], "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                pass
+    return datetime.utcnow()
+
+
+def _flyer_strings_from_event_row(ev: dict) -> Tuple[str, str, str]:
+    """(flyer_date_text, times_str, location_line) für render_auto_flyer_png."""
+    dt = _event_datetime_from_row(ev)
+    weekdays_de = [
+        "Montag",
+        "Dienstag",
+        "Mittwoch",
+        "Donnerstag",
+        "Freitag",
+        "Samstag",
+        "Sonntag",
+    ]
+    months_de = [
+        "Januar",
+        "Februar",
+        "Maerz",
+        "April",
+        "Mai",
+        "Juni",
+        "Juli",
+        "August",
+        "September",
+        "Oktober",
+        "November",
+        "Dezember",
+    ]
+    wd = weekdays_de[dt.weekday()]
+    month = months_de[dt.month - 1]
+    flyer_date_text = f"{wd}, {dt.day}. {month} {dt.year}"
+    if dt.hour == 0 and dt.minute == 0:
+        times_str = "Uhrzeit folgt"
+    else:
+        times_str = dt.strftime("%H:%M")
+    location_line = (ev.get("location") or "").strip()
+    return flyer_date_text, times_str, location_line
+
+
+async def refresh_flyer_for_event_id(event_id: int) -> Optional[str]:
+    """
+    Neu-Render für Formular-Events ohne manuellen Flyer-Upload.
+    Gibt neue image_url zurück oder None, wenn nichts geändert wurde.
+    """
+    require_db()
+    row = db.get_event_by_id(event_id)
+    if not row:
+        return None
+    src = (row.get("source") or "").strip()
+    if src not in ("web_form", "web"):
+        return None
+    auto = row.get("flyer_auto_generated")
+    if auto is False or auto == 0:
+        return None
+    raw_img = str(row.get("image_url") or "")
+    ext = Path(raw_img).suffix.lower()
+    if ext in (".jpg", ".jpeg", ".webp", ".gif"):
+        return None
+    title = str(row.get("title") or "")
+    description = str(row.get("description") or "")
+    flyer_date_text, times_str, location_line = _flyer_strings_from_event_row(row)
+    new_url = await render_auto_flyer_png(
+        title=title,
+        description=description,
+        flyer_date_text=flyer_date_text,
+        times_str=times_str,
+        location_line=location_line,
+    )
+    db.update_event_image_url(event_id, new_url)
+    return new_url
+
+
+@app.post("/internal/refresh-flyer/{event_id}")
+async def internal_refresh_flyer(
+    event_id: int,
+    request: Request,
+    __: None = Depends(require_db),
+):
+    """Vom Telegram-Bot: Flyer mit aktuellem Template neu erzeugen (Shared Secret)."""
+    if not REFRESH_FLYER_SECRET:
+        raise HTTPException(status_code=404)
+    token = (request.headers.get("X-Internal-Token") or "").strip()
+    if token != REFRESH_FLYER_SECRET:
+        raise HTTPException(status_code=404)
     try:
-        db.connect()
-        db.create_tables()
-    except Exception as e:
-        logger.exception("Dashboard: DB-Verbindung fehlgeschlagen")
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "PostgreSQL nicht erreichbar. Prüfe DATABASE_URL und ob die DB läuft. "
-                f"Technisch: {e!s}"
-            ),
-        ) from e
+        new_url = await refresh_flyer_for_event_id(event_id)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "detail": str(e)}, status_code=400)
+    if not new_url:
+        return JSONResponse({"ok": False, "skipped": True}, status_code=200)
+    return JSONResponse({"ok": True, "image_url": new_url})
 
 
 @app.get("/health")
@@ -122,8 +259,7 @@ async def health() -> dict[str, str]:
 @app.get("/start", response_class=HTMLResponse)
 async def dashboard_start() -> HTMLResponse:
     """
-    Öffentliche Einstiegshilfe: `/` verlangt sofort Basic Auth (401) — wirkt wie „leere Seite“,
-    wenn der Browser keinen Login-Dialog zeigt oder man die URL nur testet.
+    Öffentliche Einstiegshilfe. Root `/` ohne Login zeigt dieselbe Seite; Anmeldung über `/login`.
     """
     html = """<!DOCTYPE html>
 <html lang="de">
@@ -142,8 +278,8 @@ async def dashboard_start() -> HTMLResponse:
   <p>Dieser Railway-Service <strong>ist</strong> das Dashboard (FastAPI + Uvicorn). Die eigentliche Oberfläche liegt unter <code>/</code> und ist mit <strong>HTTP Basic Auth</strong> geschützt.</p>
   <ol>
     <li>In Railway beim Service <code>gifhorn-dashboard</code> die Variable <code>DASHBOARD_PASSWORD</code> setzen (und optional <code>DASHBOARD_USER</code>, Standard <code>admin</code>).</li>
-    <li>Die öffentliche URL öffnen (Railway → Service → Networking → Domain), dann auf <a href="/">Startseite /</a> gehen.</li>
-    <li>Der Browser sollte nach <strong>Benutzername und Passwort</strong> fragen — nicht mit der Railway-Anmeldung verwechseln.</li>
+    <li><strong>Anmelden:</strong> <a href="/login">Hier klicken — /login</a> — der Browser fragt dann nach Benutzername und Passwort (HTTP Basic Auth). Ohne diesen Schritt wirkt <code>/</code> oft wie eine leere Seite.</li>
+    <li>Nach erfolgreicher Anmeldung wirst du zur Übersicht weitergeleitet. Nicht mit der Railway-Login-Maske verwechseln.</li>
   </ol>
   <p>Nach dem Login: <strong>Betrieb &amp; Live</strong> (MOCK_MODE, angebundene APIs, E-Mail-Warteschlange, Auto-Flags — aktualisiert sich alle 45&nbsp;s), Eventliste, Freigaben, Einreichung. E-Mail-Flyer: <a href="/api/emails/">/api/emails/</a> (ebenfalls nach Login).</p>
   <p>Wenn stattdessen ein Datenbank-Fehler kommt: Postgres und <code>DATABASE_URL</code> prüfen.</p>
@@ -151,6 +287,15 @@ async def dashboard_start() -> HTMLResponse:
 </body>
 </html>"""
     return HTMLResponse(content=html)
+
+
+def _basic_auth_challenge() -> Response:
+    """401 ohne JSON-Body — löst in Browsern zuverlässiger die Basic-Auth-Maske aus."""
+    return Response(
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="Gifhorn Events"'},
+        content="",
+    )
 
 
 def require_dashboard_auth(
@@ -177,6 +322,28 @@ def require_dashboard_auth(
     return credentials.username
 
 
+@app.get("/login")
+async def dashboard_basic_login(
+    credentials: Optional[HTTPBasicCredentials] = Depends(security),
+):
+    """
+    Expliziter Basic-Auth-Schritt: 401 mit leerem Body, dann Redirect auf /
+    (nachdem der Browser Benutzername/Passwort gesendet hat).
+    """
+    if not DASHBOARD_PASSWORD:
+        raise HTTPException(
+            status_code=503,
+            detail="DASHBOARD_PASSWORD in .env setzen",
+        )
+    if credentials is None:
+        return _basic_auth_challenge()
+    u_ok = secrets.compare_digest(credentials.username, DASHBOARD_USER)
+    p_ok = secrets.compare_digest(credentials.password, DASHBOARD_PASSWORD)
+    if not (u_ok and p_ok):
+        return _basic_auth_challenge()
+    return RedirectResponse(url="/", status_code=303)
+
+
 def _normalize_filter(v: Optional[str]) -> str:
     if not v or v not in VALID_FILTERS:
         return "all"
@@ -187,9 +354,25 @@ def _normalize_filter(v: Optional[str]) -> str:
 async def dashboard(
     request: Request,
     status_filter: Optional[str] = Query(None, alias="filter"),
-    _: str = Depends(require_dashboard_auth),
-    __: None = Depends(require_db),
+    credentials: Optional[HTTPBasicCredentials] = Depends(security),
 ):
+    """
+    Ohne Login: öffentliche Hilfsseite (wie /start), damit kein „leerer“ JSON-401.
+    Mit gültigem Basic Auth: eigentliches Dashboard.
+    """
+    if not DASHBOARD_PASSWORD:
+        raise HTTPException(
+            status_code=503,
+            detail="DASHBOARD_PASSWORD in .env setzen",
+        )
+    if credentials is None:
+        return await dashboard_start()
+    u_ok = secrets.compare_digest(credentials.username, DASHBOARD_USER)
+    p_ok = secrets.compare_digest(credentials.password, DASHBOARD_PASSWORD)
+    if not (u_ok and p_ok):
+        return _basic_auth_challenge()
+
+    require_db()
     f = _normalize_filter(status_filter)
     events = db.list_events_dashboard(status_filter=f, limit=250)
     stats = db.dashboard_stats()
@@ -371,15 +554,6 @@ async def action_post_ready(
     return RedirectResponse(url="/", status_code=303)
 
 
-@app.get("/form/redirect", response_class=RedirectResponse)
-async def form_redirect():
-    """
-    Bio-Link Redirect: öffentlich zugänglich (kein Auth).
-    Nutzer klickt Insta/FB Bio → /form/redirect → Google Form.
-    """
-    return RedirectResponse(url=GOOGLE_FORM_URL, status_code=307)
-
-
 # ==================== WEB FORM (mit dynamischen Uhrzeiten) ====================
 
 class TimeSlot(BaseModel):
@@ -438,7 +612,9 @@ class EventFormData(BaseModel):
 @app.get("/form/event")
 async def form_event_page(request: Request):
     """Web-Form für Veranstalter (öffentlich)."""
-    return templates.TemplateResponse("event_form.html", {"request": request})
+    # Jinja2Templates.TemplateResponse Signatur ist: (request, name, context)
+    # (siehe auch die Nutzung in `dashboard()` im selben File).
+    return templates.TemplateResponse(request, "event_form.html", {})
 
 
 @app.post("/form/submit")
@@ -503,8 +679,44 @@ async def form_submit(
         times_formatted = [f"{t['start']}-{t['end']}" for t in times_list] if times_list else []
         times_str = " | ".join(times_formatted) if times_formatted else "Uhrzeiten nicht angegeben"
 
+        # Deutsches Datumsformat für Flyer/Textdarstellung
+        weekdays_de = [
+            "Montag",
+            "Dienstag",
+            "Mittwoch",
+            "Donnerstag",
+            "Freitag",
+            "Samstag",
+            "Sonntag",
+        ]
+        months_de = [
+            "Januar",
+            "Februar",
+            "Maerz",
+            "April",
+            "Mai",
+            "Juni",
+            "Juli",
+            "August",
+            "September",
+            "Oktober",
+            "November",
+            "Dezember",
+        ]
+
+        def _fmt_day_de(dt: datetime) -> str:
+            wd = weekdays_de[dt.weekday()]
+            month = months_de[dt.month - 1]
+            return f"{wd}, {dt.day}. {month} {dt.year}"
+
+        if start.date() == end.date():
+            flyer_date_text = _fmt_day_de(start)
+        else:
+            flyer_date_text = f"{_fmt_day_de(start)} bis {_fmt_day_de(end)}"
+
         # Speichere Flyer-Datei (optional)
         flyer_url = ""
+        flyer_uploaded = False
         if flyerFile and flyerFile.filename:
             try:
                 # Erstelle /flyers Ordner falls nicht existent
@@ -523,14 +735,40 @@ async def form_submit(
 
                 # Generiere öffentlichen Link
                 flyer_url = f"/flyers/{safe_filename}"
+                flyer_uploaded = True
                 logger.info(f"Flyer hochgeladen: {safe_filename}")
             except Exception as e:
                 logger.warning(f"Fehler beim Flyer-Upload: {e}")
                 # Fahre trotzdem fort — Flyer ist optional
 
+        if not flyer_url:
+            location_line = f"{locationStreet}, {locationZip} {locationCity}".strip(", ")
+            flyer_url = await render_auto_flyer_png(
+                title=title,
+                description=description.strip(),
+                flyer_date_text=flyer_date_text,
+                times_str=times_str,
+                location_line=location_line,
+            )
+
+        flyer_auto_generated = not flyer_uploaded
+
         # Formatiere event_date
         days_count = (end - start).days + 1
+        # Human-readable für die nachfolgenden Schritte (z. B. Claude Text).
         event_date_str = f"{startDate} bis {endDate} ({days_count} Tage) | {times_str}"
+
+        # PostgreSQL erwartet für `events.event_date` einen echten TIMESTAMP.
+        # Daher speichern wir für die DB den Start-Timestamp (Startdatum + erste Startzeit).
+        # (Die komplette Range inkl. Zeiten bleibt in `event_date_str` für den Text erhalten.)
+        first_start_time = (times_list[0].get("start") if times_list else "") or "00:00"
+        try:
+            # HTML input[type=time] liefert i. d. R. "HH:MM"
+            hh, mm = first_start_time.split(":")
+            event_date_db = start.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+        except Exception:
+            # Fallback, falls die Zeit nicht parsebar ist
+            event_date_db = start.replace(hour=0, minute=0, second=0, microsecond=0)
 
         # Kombiniere die drei Standort-Felder
         location_combined = f"{locationStreet} {locationZip} {locationCity}"
@@ -561,12 +799,13 @@ async def form_submit(
             title=event["title"],
             description=event["description"],
             image_url=event["image_url"],
-            event_date=event["event_date"],
+            event_date=event_date_db,
             location=event["location"],
             city=event["city"],
             url=event["url"],
             post_text=post_text,
             contact_email=event["contact_email"],
+            flyer_auto_generated=flyer_auto_generated,
         )
 
         logger.info(f"Web-Form Event eingereicht: {event['title']} (ID: {eid})")

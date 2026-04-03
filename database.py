@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 _BERLIN = ZoneInfo("Europe/Berlin")
 
+# Dashboard-Liste: sehr lange post_text/description killen RAM/Browser (Filter „Warten auf Freigabe“).
+_DASHBOARD_EVENT_TEXT_CAP = 4000
+
 
 def _created_at_to_berlin_date(val: Any) -> date:
     """created_at aus DB → Datum in Europe/Berlin (naive Zeit = UTC)."""
@@ -60,6 +63,9 @@ class Database:
             # Ohne Timeout kann connect() bei Netz/DB-Problemen hängen und den ganzen
             # Uvicorn-Prozess blockieren (z. B. wenn Webhooks sync DB nutzen).
             self.conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+            # Ohne autocommit bleiben reine SELECTs in einer offenen Transaktion haengen
+            # ("idle in transaction") und blockieren ALTER TABLE / Migrationen.
+            self.conn.autocommit = True
             logger.info("PostgreSQL verbunden")
             return
 
@@ -83,6 +89,8 @@ class Database:
 
         if self.mode == "pg":
             with self.conn.cursor() as cur:
+                # Sonst kann ALTER TABLE bei blockiertem events-Lock endlos warten (Dashboard „lädt ewig“).
+                cur.execute("SET lock_timeout = '60s'")
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS events (
@@ -226,6 +234,13 @@ class Database:
                     ADD COLUMN IF NOT EXISTS contact_email VARCHAR(255)
                     """
                 )
+                cur.execute(
+                    """
+                    ALTER TABLE events
+                    ADD COLUMN IF NOT EXISTS flyer_auto_generated BOOLEAN DEFAULT NULL
+                    """
+                )
+                cur.execute("RESET lock_timeout")
 
             self.conn.commit()
             logger.info("Tabellen erstellt/überprüft (Postgres)")
@@ -328,6 +343,7 @@ class Database:
                 "ALTER TABLE email_submissions ADD COLUMN ingest_batch_id TEXT",
                 "ALTER TABLE events ADD COLUMN evening_preview_sent INTEGER DEFAULT 0",
                 "ALTER TABLE events ADD COLUMN contact_email TEXT",
+                "ALTER TABLE events ADD COLUMN flyer_auto_generated INTEGER",
             ):
                 try:
                     self.conn.execute(_alter)
@@ -350,6 +366,7 @@ class Database:
         url: Optional[str] = None,
         post_text: Optional[str] = None,
         contact_email: Optional[str] = None,
+        flyer_auto_generated: Optional[bool] = None,
     ) -> Optional[int]:
         self._ensure_conn()
 
@@ -365,8 +382,9 @@ class Database:
                         """
                         INSERT INTO events
                         (source, source_id, title, description, image_url,
-                         event_date, location, city, price_min, price_max, url, post_text, contact_email, created_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                         event_date, location, city, price_min, price_max, url, post_text, contact_email,
+                         flyer_auto_generated, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                         RETURNING id
                         """,
                         (
@@ -383,6 +401,7 @@ class Database:
                             url,
                             post_text,
                             contact_email,
+                            flyer_auto_generated,
                         ),
                     )
                     row = cur.fetchone()
@@ -400,8 +419,9 @@ class Database:
                     """
                     INSERT INTO events
                     (source, source_id, title, description, image_url,
-                     event_date, location, city, price_min, price_max, url, post_text, contact_email, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                     event_date, location, city, price_min, price_max, url, post_text, contact_email,
+                     flyer_auto_generated, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
                     (
                         source,
@@ -417,6 +437,7 @@ class Database:
                         url,
                         post_text,
                         contact_email,
+                        None if flyer_auto_generated is None else (1 if flyer_auto_generated else 0),
                     ),
                 )
                 return int(cur.lastrowid)
@@ -494,6 +515,32 @@ class Database:
         row = self.conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
         return dict(row) if row else None
 
+    def update_event_image_url(self, event_id: int, image_url: str) -> None:
+        """Aktualisiert nur das Vorschaubild (z. B. nach Flyer-Neu-Render)."""
+        self._ensure_conn()
+        if self.mode == "pg":
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE events
+                    SET image_url = %s, updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (image_url, event_id),
+                )
+            self.conn.commit()
+            return
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE events
+                SET image_url = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (image_url, now, event_id),
+            )
+
     def set_telegram_approval(self, event_id: int, approved: bool) -> None:
         self._ensure_conn()
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -543,6 +590,123 @@ class Database:
                     """,
                     (now, event_id),
                 )
+
+    def reset_all_rejected_events_not_posted(self) -> int:
+        """
+        Alle per Telegram/Dashboard abgelehnten Events (noch nicht gepostet)
+        wieder in die erste Revision: Ablehnung aufheben, Vorschau-Flags und
+        post_text zurücksetzen — wie reset_event_for_regeneration, aber für alle.
+        """
+        self._ensure_conn()
+        if self.mode == "pg":
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE events
+                    SET approved_for_social = FALSE,
+                        telegram_rejected = FALSE,
+                        evening_preview_sent = FALSE,
+                        post_text = NULL,
+                        updated_at = NOW()
+                    WHERE COALESCE(telegram_rejected, FALSE) = TRUE
+                      AND posted_at IS NULL
+                    """
+                )
+                n = cur.rowcount
+            self.conn.commit()
+            return int(n or 0)
+
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                UPDATE events
+                SET approved_for_social = 0,
+                    telegram_rejected = 0,
+                    evening_preview_sent = 0,
+                    post_text = NULL,
+                    updated_at = ?
+                WHERE COALESCE(telegram_rejected, 0) = 1
+                  AND posted_at IS NULL
+                """,
+                (now,),
+            )
+        return int(cur.rowcount if cur.rowcount is not None else 0)
+
+    def reset_rejected_email_submissions_to_pending(self) -> int:
+        """E-Mail-Einreichungen mit Status rejected → wieder pending (zum Durchspielen)."""
+        self._ensure_conn()
+        if self.mode == "pg":
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE email_submissions
+                    SET approval_status = 'pending',
+                        approved_by = NULL,
+                        approved_post_text = NULL,
+                        approved_at = NULL,
+                        updated_at = NOW()
+                    WHERE approval_status = 'rejected'
+                    """
+                )
+                n = cur.rowcount
+            self.conn.commit()
+            return int(n or 0)
+
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                UPDATE email_submissions
+                SET approval_status = 'pending',
+                    approved_by = NULL,
+                    approved_post_text = NULL,
+                    approved_at = NULL,
+                    updated_at = ?
+                WHERE approval_status = 'rejected'
+                """,
+                (now,),
+            )
+        return int(cur.rowcount if cur.rowcount is not None else 0)
+
+    def reset_event_for_regeneration(self, event_id: int) -> None:
+        """
+        Setzt ein Event auf "neu generieren":
+        - zurück in offene Revision
+        - verwirft vorhandenen post_text, damit neu erstellt wird
+        """
+        self._ensure_conn()
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        if self.mode == "pg":
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE events
+                    SET approved_for_social = FALSE,
+                        telegram_rejected = FALSE,
+                        evening_preview_sent = FALSE,
+                        post_text = NULL,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (event_id,),
+                )
+            self.conn.commit()
+            return
+
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE events
+                SET approved_for_social = 0,
+                    telegram_rejected = 0,
+                    evening_preview_sent = 0,
+                    post_text = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (now, event_id),
+            )
 
     def mark_event_posted(
         self, event_id: int, instagram: bool = False, facebook: bool = False
@@ -602,15 +766,25 @@ class Database:
             elif status_filter == "rejected":
                 cond = "COALESCE(telegram_rejected, FALSE) = TRUE"
 
+            cap = _DASHBOARD_EVENT_TEXT_CAP
             with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     f"""
-                    SELECT * FROM events
+                    SELECT
+                      id, source, source_id, title,
+                      LEFT(COALESCE(description, ''), %s) AS description,
+                      image_url, event_date, location, city, price_min, price_max, url,
+                      LEFT(COALESCE(post_text, ''), %s) AS post_text,
+                      posted_at, posted_to_instagram, posted_to_facebook,
+                      event_hash, canonical_id, created_at, updated_at,
+                      approved_for_social, telegram_rejected,
+                      evening_preview_sent, contact_email, flyer_auto_generated
+                    FROM events
                     WHERE {cond}
                     ORDER BY event_date DESC NULLS LAST, id DESC
                     LIMIT %s
                     """,
-                    (limit,),
+                    (cap, cap, limit),
                 )
                 return [dict(r) for r in cur.fetchall()]
 
@@ -634,14 +808,24 @@ class Database:
         else:
             where = "1=1"
 
+        cap = _DASHBOARD_EVENT_TEXT_CAP
         rows = self.conn.execute(
             f"""
-            SELECT * FROM events
+            SELECT
+              id, source, source_id, title,
+              substr(COALESCE(description, ''), 1, ?) AS description,
+              image_url, event_date, location, city, price_min, price_max, url,
+              substr(COALESCE(post_text, ''), 1, ?) AS post_text,
+              posted_at, posted_to_instagram, posted_to_facebook,
+              event_hash, canonical_id, created_at, updated_at,
+              approved_for_social, telegram_rejected,
+              evening_preview_sent, contact_email, flyer_auto_generated
+            FROM events
             WHERE {where}
             ORDER BY event_date DESC, id DESC
             LIMIT ?
             """,
-            (limit,),
+            (cap, cap, limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -1156,8 +1340,11 @@ class Database:
         self, berlin_day: date
     ) -> List[Dict[str, Any]]:
         """
-        Aus Mails erzeugte Beiträge: warten auf Freigabe, Abend-Übersicht noch nicht gesendet,
-        Erstellungsdatum (created_at) am berlin_day.
+        Beiträge zur zweiten Revision:
+        - Mail-Pipeline: source=email_submission, noch nicht freigegeben
+        - Form-Pipeline: source=web_form/web, bereits freigegeben
+        Zusätzlich: noch nicht gepostet/verworfen, evening_preview_sent=false,
+        post_text vorhanden, created_at am berlin_day.
         """
         self._ensure_conn()
         if self.mode == "pg":
@@ -1165,13 +1352,15 @@ class Database:
                 cur.execute(
                     """
                     SELECT * FROM events
-                    WHERE source = 'email_submission'
-                      AND posted_at IS NULL
-                      AND COALESCE(approved_for_social, FALSE) = FALSE
+                    WHERE posted_at IS NULL
                       AND COALESCE(telegram_rejected, FALSE) = FALSE
                       AND COALESCE(evening_preview_sent, FALSE) = FALSE
                       AND post_text IS NOT NULL
                       AND TRIM(post_text) <> ''
+                      AND (
+                        (source = 'email_submission' AND COALESCE(approved_for_social, FALSE) = FALSE)
+                        OR (source IN ('web_form', 'web') AND COALESCE(approved_for_social, FALSE) = TRUE)
+                      )
                     ORDER BY id ASC
                     LIMIT 100
                     """
@@ -1181,13 +1370,15 @@ class Database:
             rows = self.conn.execute(
                 """
                 SELECT * FROM events
-                WHERE source = 'email_submission'
-                  AND posted_at IS NULL
-                  AND COALESCE(approved_for_social, 0) = 0
+                WHERE posted_at IS NULL
                   AND COALESCE(telegram_rejected, 0) = 0
                   AND COALESCE(evening_preview_sent, 0) = 0
                   AND post_text IS NOT NULL
                   AND TRIM(post_text) <> ''
+                  AND (
+                    (source = 'email_submission' AND COALESCE(approved_for_social, 0) = 0)
+                    OR (source IN ('web_form', 'web') AND COALESCE(approved_for_social, 0) = 1)
+                  )
                 ORDER BY id ASC
                 LIMIT 100
                 """

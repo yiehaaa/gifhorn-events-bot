@@ -7,13 +7,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from datetime import datetime
+from io import BytesIO
+from pathlib import Path
 from typing import Any, Dict, List
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from claude_handler import claude_handler
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import (
+    DASHBOARD_URL,
+    EMAIL_ATTACHMENT_STORAGE_PATH,
+    FORM_URL,
+    PUBLIC_IMAGE_BASE_URL,
+    REFRESH_FLYER_SECRET,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+    public_image_url,
+)
 from database import db
 
 logger = logging.getLogger(__name__)
@@ -30,12 +44,211 @@ class TelegramBot:
         if self.disabled:
             return
         if update.message:
+            # Infotext und Menü getrennt: Manche Clients zeigen Inline-Keyboards
+            # zuverlässiger, wenn es eine eigene kurze Nachricht ist.
             await update.message.reply_text(
                 "👋 Gifhorn Events Bot\n"
                 "Mail-Digest: Spam pro Zeile mit ❌ ablehnen, dann „Alle übrigen freigeben“.\n"
                 "Später: KI-Beiträge (21 Uhr per Cron) freigeben.\n"
-                "Läuft mit: python telegram_bot.py"
+                "Läuft mit: python telegram_bot.py",
             )
+            await update.message.reply_text(
+                "📋 Menü — bitte einen Button wählen:",
+                reply_markup=self._menu_keyboard(),
+            )
+
+    async def menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Explizites Menu-Kommando für On-Demand-Revision."""
+        if self.disabled or not update.message:
+            return
+        await update.message.reply_text("📋 Revision-Menü")
+        await update.message.reply_text(
+            "Bitte einen Button wählen:",
+            reply_markup=self._menu_keyboard(),
+        )
+
+    def _menu_keyboard(self) -> InlineKeyboardMarkup:
+        # Telegram: Inline-Button-Text max. 64 Zeichen; kurz halten.
+        dashboard_url = self._dashboard_url()
+        form_url = self._form_url(dashboard_url)
+        rows: List[List[InlineKeyboardButton]] = [
+            [
+                InlineKeyboardButton(
+                    "📥 Events zur Revision",
+                    callback_data="menu_incoming_events",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📝 Erstellte Beiträge zur Revision",
+                    callback_data="menu_created_posts",
+                )
+            ],
+        ]
+        if dashboard_url:
+            rows.append([InlineKeyboardButton("🌐 Dashboard öffnen", url=dashboard_url)])
+        if form_url:
+            rows.append([InlineKeyboardButton("📝 Formular öffnen", url=form_url)])
+        return InlineKeyboardMarkup(
+            rows
+        )
+
+    @staticmethod
+    def _ensure_https(url: str) -> str:
+        u = (url or "").strip()
+        if not u:
+            return ""
+        if u.startswith(("http://", "https://")):
+            return u
+        return f"https://{u}"
+
+    def _dashboard_url(self) -> str:
+        direct = os.getenv("DASHBOARD_PUBLIC_URL", "").strip()
+        if direct:
+            return self._ensure_https(direct.rstrip("/"))
+
+        railway_dash = os.getenv("RAILWAY_SERVICE_GIFHORN_DASHBOARD_URL", "").strip()
+        if railway_dash:
+            return self._ensure_https(railway_dash.rstrip("/"))
+
+        base = (PUBLIC_IMAGE_BASE_URL or "").strip().rstrip("/")
+        if base.endswith("/flyers"):
+            return base[: -len("/flyers")]
+        if base:
+            return base
+
+        dash_cfg = (DASHBOARD_URL or "").strip()
+        if dash_cfg and "localhost" not in dash_cfg and "127.0.0.1" not in dash_cfg:
+            return self._ensure_https(dash_cfg.rstrip("/"))
+        return ""
+
+    def _form_url(self, dashboard_url: str) -> str:
+        form = (FORM_URL or "").strip()
+        if form and "localhost" not in form and "127.0.0.1" not in form:
+            return self._ensure_https(form)
+        if dashboard_url:
+            return f"{dashboard_url}/form/event"
+        return ""
+
+    def _flyer_refresh_base_url(self) -> str:
+        """Basis-URL des Dashboards für POST /internal/refresh-flyer/…"""
+        internal = os.getenv("DASHBOARD_INTERNAL_BASE_URL", "").strip()
+        if internal:
+            return self._ensure_https(internal.rstrip("/"))
+        return self._dashboard_url()
+
+    async def _maybe_refresh_flyer_for_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Formular-Events ohne manuellen Flyer: vor der Vorschau neu rendern,
+        damit Telegram die aktuelle HTML-Vorlage (neuer Dateiname) nutzt.
+        """
+        if not REFRESH_FLYER_SECRET:
+            return event
+        src = (event.get("source") or "").strip()
+        if src not in ("web_form", "web"):
+            return event
+        auto = event.get("flyer_auto_generated")
+        if auto is False or auto == 0:
+            return event
+        raw_img = str(event.get("image_url") or "")
+        ext = Path(raw_img).suffix.lower()
+        if ext in (".jpg", ".jpeg", ".webp", ".gif"):
+            return event
+        base = self._flyer_refresh_base_url()
+        if not base:
+            return event
+        eid = int(event["id"])
+        url = f"{base}/internal/refresh-flyer/{eid}"
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                r = await client.post(
+                    url,
+                    headers={"X-Internal-Token": REFRESH_FLYER_SECRET},
+                )
+            if r.status_code != 200:
+                logger.warning(
+                    "refresh-flyer HTTP %s für event_id=%s",
+                    r.status_code,
+                    eid,
+                )
+                return event
+            data = r.json()
+            if data.get("ok") and data.get("image_url"):
+                out = dict(event)
+                out["image_url"] = data["image_url"]
+                return out
+        except Exception:
+            logger.exception("refresh-flyer fehlgeschlagen (event_id=%s)", eid)
+        return event
+
+    @staticmethod
+    def _format_price_label(event: Dict[str, Any]) -> str:
+        """Normalize empty/zero prices to a friendlier text."""
+        pmin = event.get("price_min")
+        pmax = event.get("price_max")
+
+        def _to_float(value: Any) -> float | None:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        min_value = _to_float(pmin)
+        max_value = _to_float(pmax)
+        if (min_value in (None, 0.0)) and (max_value in (None, 0.0)):
+            return "Eintritt frei!"
+        if min_value is not None and max_value is not None:
+            return f"{min_value:g}–{max_value:g} €"
+        if min_value is not None:
+            return f"ab {min_value:g} €"
+        if max_value is not None:
+            return f"bis {max_value:g} €"
+        return "Eintritt frei!"
+
+    async def _handle_menu_callback(self, data: str, query: Any) -> bool:
+        """On-demand Menueaktionen; gibt True zurueck, wenn verarbeitet."""
+        if data not in {"menu_incoming_events", "menu_created_posts"}:
+            return False
+
+        if not db.conn:
+            db.connect()
+            db.create_tables()
+
+        await query.answer()
+
+        if data == "menu_incoming_events":
+            events = db.get_events_awaiting_telegram()
+            if not events:
+                await query.edit_message_text(
+                    "📥 Aktuell keine eingegangenen Events zur Revision."
+                )
+                return True
+            await self.send_events_for_approval(events)
+            await query.edit_message_text(
+                f"📥 {len(events[:10])} Event(s) zur Revision gesendet ({datetime.now().strftime('%H:%M')})."
+            )
+            return True
+
+        # menu_created_posts
+        from zoneinfo import ZoneInfo
+
+        berlin_day = datetime.now(ZoneInfo("Europe/Berlin")).date()
+        events = db.get_email_derived_events_for_evening_preview(berlin_day)
+        if not events:
+            await query.edit_message_text(
+                "📝 Aktuell keine erstellten Beitraege zur Revision."
+            )
+            return True
+
+        await self.send_evening_email_posts_batch(events)
+        await query.edit_message_text(
+            f"📝 {len(events[:12])} Beitrag(e) zur Revision gesendet ({datetime.now().strftime('%H:%M')})."
+        )
+        return True
 
     async def send_daily_email_digest(
         self, emails: List[Dict[str, Any]], batch_hex: str
@@ -134,49 +347,149 @@ class TelegramBot:
         chunk = events[:max_events]
         included_ids: List[int] = []
 
-        lines: List[str] = [
-            "🌆 Beiträge aus Einreichungs-Mails (21 Uhr)",
-            "",
-            "Bild = Flyer aus der Mail; Text = KI-Caption. Pro Zeile freigeben oder verwerfen.",
-            "",
-        ]
-        keyboard: List[List[InlineKeyboardButton]] = []
+        await bot.send_message(
+            chat_id=self.chat_id,
+            text=(
+                "🌆 Erstellte Beiträge zur Revision\n\n"
+                "Quelle: Mail (KI-Caption + Mail-Flyer) und freigegebene Form-Events.\n"
+                "Du bekommst pro Beitrag nur das Bild mit ✅/❌."
+            ),
+        )
 
         for event in chunk:
+            event = await self._maybe_refresh_flyer_for_event(event)
             eid = int(event["id"])
             included_ids.append(eid)
             title = str(event.get("title", "Event"))[:100]
             preview = str(event.get("post_text", ""))[:200]
             if len(str(event.get("post_text", ""))) > 200:
                 preview += "…"
-            lines.append(f"— {title} —")
-            lines.append(preview)
-            lines.append("")
             short = title[:22] + ("…" if len(title) > 22 else "")
-            keyboard.append(
+            reply_markup = InlineKeyboardMarkup(
                 [
-                    InlineKeyboardButton(
-                        f"✅ {short}",
-                        callback_data=f"approve_{eid}",
-                    ),
-                    InlineKeyboardButton("❌", callback_data=f"reject_{eid}"),
+                    [
+                        InlineKeyboardButton(
+                            f"✅ {short}",
+                            callback_data=f"approve_{eid}",
+                        ),
+                        InlineKeyboardButton("❌", callback_data=f"reject_{eid}"),
+                        InlineKeyboardButton("🔄", callback_data=f"reset_{eid}"),
+                    ]
                 ]
             )
+            raw_image = str(event.get("image_url") or "")
+            image_url = public_image_url(raw_image)
+            has_public_image = image_url.startswith(("http://", "https://"))
+
+            if has_public_image:
+                try:
+                    await bot.send_photo(
+                        chat_id=self.chat_id,
+                        photo=image_url,
+                        reply_markup=reply_markup,
+                    )
+                    continue
+                except Exception:
+                    logger.exception(
+                        "Bildvorschau fehlgeschlagen, fallback auf Text (event_id=%s)",
+                        eid,
+                    )
+
+            local_image = self._resolve_local_image_path(raw_image)
+            if local_image and local_image.is_file():
+                try:
+                    with local_image.open("rb") as fh:
+                        await bot.send_photo(
+                            chat_id=self.chat_id,
+                            photo=fh,
+                            reply_markup=reply_markup,
+                        )
+                    continue
+                except Exception:
+                    logger.exception(
+                        "Lokale Bildvorschau fehlgeschlagen, fallback auf Text (event_id=%s)",
+                        eid,
+                    )
+
+            try:
+                fallback_image = self._build_fallback_preview_image(event)
+                await bot.send_photo(
+                    chat_id=self.chat_id,
+                    photo=fallback_image,
+                    reply_markup=reply_markup,
+                )
+            except Exception:
+                logger.exception("Fallback-Bild konnte nicht erzeugt/gesendet werden (event_id=%s)", eid)
 
         if len(events) > max_events:
-            lines.append(f"… und {len(events) - max_events} weitere im Dashboard.")
-
-        message_text = "\n".join(lines)
-        if len(message_text) > 4000:
-            message_text = message_text[:3990] + "\n…"
-
-        await bot.send_message(
-            chat_id=self.chat_id,
-            text=message_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+            await bot.send_message(
+                chat_id=self.chat_id,
+                text=f"… und {len(events) - max_events} weitere im Dashboard.",
+            )
         logger.info("🌆 Abend-Preview gesendet (%s Beiträge)", len(chunk))
         return included_ids
+
+    @staticmethod
+    def _resolve_local_image_path(raw_image: str) -> Path | None:
+        if not raw_image:
+            return None
+        s = raw_image.strip()
+        if not s:
+            return None
+        if s.startswith(("http://", "https://")):
+            return None
+        if s.startswith("/flyers/"):
+            return Path(EMAIL_ATTACHMENT_STORAGE_PATH) / Path(s).name
+        p = Path(s)
+        if p.is_absolute():
+            return p
+        return Path(EMAIL_ATTACHMENT_STORAGE_PATH) / p.name
+
+    @staticmethod
+    def _build_fallback_preview_image(event: Dict[str, Any]) -> BytesIO:
+        """Build a minimal readable fallback image if source file/url is unavailable."""
+        from PIL import Image, ImageDraw, ImageFont
+
+        width, height = 1080, 1350
+        img = Image.new("RGB", (width, height), color=(18, 22, 35))
+        draw = ImageDraw.Draw(img)
+
+        def _font(size: int):
+            for candidate in (
+                "DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            ):
+                try:
+                    return ImageFont.truetype(candidate, size)
+                except Exception:
+                    continue
+            return ImageFont.load_default()
+
+        title = str(event.get("title") or "Veranstaltung")
+        date_text = str(event.get("event_date") or "").strip()
+        location = str(event.get("location") or "").strip()
+        city = str(event.get("city") or "").strip()
+        place = f"{location} ({city})" if city and city not in location else (location or city)
+
+        draw.rounded_rectangle((60, 70, 1020, 1280), radius=36, fill=(25, 31, 50))
+        draw.text((100, 120), "BILD NICHT VERFUEGBAR", fill=(139, 162, 255), font=_font(34))
+        y = 220
+        for line in title.split("\n"):
+            for part in [line[i : i + 20] for i in range(0, len(line), 20)][:4]:
+                draw.text((100, y), part, fill=(244, 248, 255), font=_font(82))
+                y += 90
+        y += 20
+        if date_text:
+            draw.text((100, y), date_text[:70], fill=(203, 215, 255), font=_font(44))
+            y += 64
+        if place:
+            draw.text((100, y), place[:70], fill=(203, 215, 255), font=_font(44))
+
+        out = BytesIO()
+        img.save(out, format="PNG")
+        out.seek(0)
+        return out
 
     async def send_info_message(self, text: str) -> None:
         """Kurze Info ohne Buttons (z. B. Auto-Freigabe nach Email-Pipeline)."""
@@ -209,15 +522,14 @@ class TelegramBot:
             loc = event.get("location", "N/A")
             city = event.get("city", "N/A")
             ed = event.get("event_date", "N/A")
-            pmin = event.get("price_min", "?")
-            pmax = event.get("price_max", "?")
             preview = str(event.get("post_text", ""))[:150]
             eid = event["id"]
+            price_label = self._format_price_label(event)
 
             lines.append(title)
             lines.append(f"📍 {loc} ({city})")
             lines.append(f"📅 {ed}")
-            lines.append(f"💰 {pmin}–{pmax} €")
+            lines.append(f"💰 {price_label}")
             lines.append("")
             lines.append("📝 Post (Auszug):")
             lines.append(f"{preview}…")
@@ -231,6 +543,7 @@ class TelegramBot:
                         callback_data=f"approve_{eid}",
                     ),
                     InlineKeyboardButton("❌", callback_data=f"reject_{eid}"),
+                    InlineKeyboardButton("🔄", callback_data=f"reset_{eid}"),
                 ]
             )
 
@@ -262,6 +575,10 @@ class TelegramBot:
 
         callback_answered = False
         try:
+            # Menueaktionen (on-demand Abrufe)
+            if await self._handle_menu_callback(data, query):
+                return
+
             # Einzelne Mail als Spam (vor „Alle übrigen freigeben“)
             if data.startswith("emspam_"):
                 try:
@@ -308,6 +625,33 @@ class TelegramBot:
                 except Exception:
                     pass
 
+    async def _edit_callback_feedback(self, query: Any, text: str) -> None:
+        """
+        Nach Inline-Button: Telegram unterscheidet Text- vs. Medien-Nachrichten.
+        Bei Fotos schlägt edit_message_text fehl → Nutzer sieht endlos „Lädt…“ ohne Feedback.
+        """
+        msg = query.message
+        if msg is None:
+            return
+        cap = text[:1024]
+        try:
+            if msg.photo:
+                await query.edit_message_caption(caption=cap, reply_markup=None)
+            elif msg.document and not (msg.text or "").strip():
+                await query.edit_message_caption(caption=cap, reply_markup=None)
+            else:
+                await query.edit_message_text(text=cap, reply_markup=None)
+        except TelegramError as exc:
+            logger.warning("Telegram Nachricht nach Callback nicht editierbar: %s", exc)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except TelegramError:
+                pass
+            try:
+                await query.answer(cap[:180], show_alert=True)
+            except TelegramError:
+                pass
+
     async def _handle_event_callback(
         self, action: str, sid: str, query: Any
     ) -> None:
@@ -315,26 +659,33 @@ class TelegramBot:
         try:
             event_id = int(sid)
         except ValueError:
-            await query.edit_message_text(text="❌ Ungültige Auswahl.")
+            await self._edit_callback_feedback(query, "❌ Ungültige Auswahl.")
             return
 
         if not db.conn:
             db.connect()
         row = db.get_event_by_id(event_id)
         if not row:
-            await query.edit_message_text(text="❌ Event nicht gefunden.")
+            await self._edit_callback_feedback(query, "❌ Event nicht gefunden.")
             return
 
-        title = row.get("title", "")
+        title = str(row.get("title") or "")
 
         if action == "approve":
             db.set_telegram_approval(event_id, approved=True)
-            await query.edit_message_text(text=f"✅ Freigegeben: {title}")
+            await self._edit_callback_feedback(query, f"✅ Freigegeben: {title}")
             logger.info("Telegram freigegeben: %s (id=%s)", title, event_id)
         elif action == "reject":
             db.set_telegram_approval(event_id, approved=False)
-            await query.edit_message_text(text=f"❌ Verworfen: {title}")
+            await self._edit_callback_feedback(query, f"❌ Verworfen: {title}")
             logger.info("Telegram verworfen: %s (id=%s)", title, event_id)
+        elif action == "reset":
+            db.reset_event_for_regeneration(event_id)
+            await self._edit_callback_feedback(
+                query,
+                f"🔄 Zurückgesetzt: {title}\nWird in der nächsten Runde neu generiert.",
+            )
+            logger.info("Telegram zurückgesetzt: %s (id=%s)", title, event_id)
 
     async def _handle_single_email_spam_reject(self, submission_id: int, query: Any) -> None:
         """Eine Mail aus dem Digest als Spam/unerwünscht markieren."""
@@ -403,6 +754,7 @@ class TelegramBot:
         if self.disabled:
             return
         application.add_handler(CommandHandler("start", self.start))
+        application.add_handler(CommandHandler("menu", self.menu))
         # Kein Regex-Filter: In PTB 21 kann ein zu strenges Pattern Callbacks verwerfen
         # → Telegram zeigt endlos „Lädt…“, weil answer() nie aufgerufen wird.
         application.add_handler(CallbackQueryHandler(self.on_callback))

@@ -160,9 +160,6 @@ async def collect_and_approve_flow() -> None:
     # Approved Emails → Claude → Events (separater Schritt nach dem try/finally)
     await process_approved_email_submissions()
 
-    # Google Form Responses → Claude → Events
-    await process_google_form_submissions()
-
 
 async def process_approved_email_submissions() -> None:
     """

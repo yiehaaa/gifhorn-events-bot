@@ -4,9 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Gifhorn Events — Dashboard</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700;1,9..40,400&family=Syne:wght@600;700&display=swap" rel="stylesheet" />
+  <!-- Keine externen Fonts: blockieren sonst das Rendering (langsames/leeres Tab). -->
   <style>
     :root {
       --bg: #ede8dc;
@@ -22,7 +20,7 @@
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: "DM Sans", system-ui, sans-serif;
+      font-family: system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       font-optical-sizing: auto;
       background: var(--bg);
       color: var(--ink);
@@ -33,7 +31,7 @@
     }
     .wrap { max-width: 1180px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
     h1 {
-      font-family: "Syne", sans-serif;
+      font-family: ui-sans-serif, system-ui, sans-serif;
       font-weight: 700;
       font-size: clamp(1.6rem, 4vw, 2.1rem);
       letter-spacing: -0.03em;
@@ -52,7 +50,7 @@
       border-radius: 12px;
       padding: 0.85rem 1rem;
     }
-    .stat b { display: block; font-size: 1.45rem; font-family: "Syne", sans-serif; }
+    .stat b { display: block; font-size: 1.45rem; font-family: ui-sans-serif, system-ui, sans-serif; }
     .stat span { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
     .filters {
       display: flex; flex-wrap: wrap; gap: 0.5rem;
@@ -109,7 +107,7 @@
     details.logs { margin-top: 0.5rem; }
     details.logs summary {
       cursor: pointer;
-      font-family: "Syne", sans-serif;
+      font-family: ui-sans-serif, system-ui, sans-serif;
       font-weight: 600;
       padding: 0.75rem 0;
     }
@@ -151,7 +149,7 @@
     <div class="card" style="margin-bottom: 1.25rem;">
       <div style="padding: 1rem 1rem 1.1rem;">
         <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:0.75rem; margin-bottom:0.75rem;">
-          <h2 style="margin:0; font-family: &quot;Syne&quot;, sans-serif;">Betrieb &amp; Live</h2>
+          <h2 style="margin:0; font-family: ui-sans-serif, system-ui, sans-serif;">Betrieb &amp; Live</h2>
           <span class="muted" id="live-refresh-status">Auto-Refresh aktiv</span>
         </div>
         <p class="muted" style="margin:0 0 0.85rem;">
@@ -198,7 +196,7 @@
 
     <div class="card">
       <div style="padding: 1rem 1rem 0.75rem;">
-        <h2 style="margin: 0; font-family: \"Syne\", sans-serif;">Event einreichen</h2>
+        <h2 style="margin: 0; font-family: ui-sans-serif, system-ui, sans-serif;">Event einreichen</h2>
         <p class="sub" style="margin: 0.35rem 0 0.85rem;">
           Ohne externe APIs: landet sofort bei „Warten auf Freigabe“.
         </p>
@@ -249,7 +247,7 @@
 
     <div class="card" style="margin-top: -0.25rem;">
       <div style="padding: 1rem;">
-        <h2 style="margin: 0; font-family: \"Syne\", sans-serif;">Posting testen</h2>
+        <h2 style="margin: 0; font-family: ui-sans-serif, system-ui, sans-serif;">Posting testen</h2>
         <p class="sub" style="margin: 0.35rem 0 0.85rem;">
           Setzt alle „Freigegeben → Meta“-Events auf „Gepostet“ (im MOCK_MODE ohne Instagram/Facebook).
         </p>
@@ -357,11 +355,21 @@
     } catch (e) { /* ignore */ }
   }
   function pull() {
-    fetch("/api/dashboard/snapshot", { credentials: "same-origin", headers: { Accept: "application/json" } })
-      .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+    var ctrl = new AbortController();
+    var t = setTimeout(function () { ctrl.abort(); }, 12000);
+    fetch("/api/dashboard/snapshot", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+      signal: ctrl.signal
+    })
+      .then(function (r) {
+        clearTimeout(t);
+        return r.ok ? r.json() : Promise.reject(new Error("snapshot"));
+      })
       .then(applySnapshot)
       .catch(function () {
-        setText("live-refresh-status", "Snapshot fehlgeschlagen (Netzwerk/Auth)");
+        clearTimeout(t);
+        setText("live-refresh-status", "Snapshot: Timeout oder Auth — Seite nutzbar, Zahlen ggf. F5");
       });
   }
   var btn = document.getElementById("btn-refresh-now");
