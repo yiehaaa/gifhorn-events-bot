@@ -6,8 +6,10 @@ Email-Screening für Event-Plakate und -Texte.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
+import tempfile
 from datetime import datetime
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -35,6 +37,70 @@ SCOPES: List[str] = [
     "https://www.googleapis.com/auth/gmail.send",
 ]
 
+_client_secret_temp: Optional[str] = None
+_token_temp: Optional[str] = None
+
+
+def gmail_oauth_configured() -> bool:
+    """True, wenn Token- und/oder Client-Daten als Datei oder Railway-JSON-Variable vorliegen."""
+    if os.path.isfile(GOOGLE_TOKEN_FILE):
+        return True
+    if (os.getenv("GOOGLE_TOKEN_JSON") or "").strip():
+        return True
+    if os.path.isfile(GOOGLE_CREDENTIALS_FILE):
+        return True
+    if (os.getenv("GOOGLE_OAUTH_CLIENT_SECRET_JSON") or "").strip():
+        return True
+    return False
+
+
+def _ensure_token_file() -> Optional[str]:
+    """Pfad zu token.json oder temporäre Datei aus GOOGLE_TOKEN_JSON."""
+    global _token_temp
+    if os.path.isfile(GOOGLE_TOKEN_FILE):
+        return GOOGLE_TOKEN_FILE
+    raw = (os.getenv("GOOGLE_TOKEN_JSON") or "").strip()
+    if not raw:
+        return None
+    try:
+        json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"GOOGLE_TOKEN_JSON ist kein gültiges JSON: {e}") from e
+    if _token_temp and os.path.isfile(_token_temp):
+        return _token_temp
+    fd, path = tempfile.mkstemp(prefix="gmail_token_", suffix=".json")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(raw)
+    _token_temp = path
+    logger.info("Gmail-Token aus Umgebungsvariable GOOGLE_TOKEN_JSON (temp-Datei)")
+    return path
+
+
+def _ensure_client_secret_file() -> Optional[str]:
+    """Pfad zu client_secret.json oder temporäre Datei aus GOOGLE_OAUTH_CLIENT_SECRET_JSON."""
+    global _client_secret_temp
+    if os.path.isfile(GOOGLE_CREDENTIALS_FILE):
+        return GOOGLE_CREDENTIALS_FILE
+    raw = (os.getenv("GOOGLE_OAUTH_CLIENT_SECRET_JSON") or "").strip()
+    if not raw:
+        return None
+    try:
+        json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"GOOGLE_OAUTH_CLIENT_SECRET_JSON ist kein gültiges JSON: {e}"
+        ) from e
+    if _client_secret_temp and os.path.isfile(_client_secret_temp):
+        return _client_secret_temp
+    fd, path = tempfile.mkstemp(prefix="gmail_oauth_client_", suffix=".json")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(raw)
+    _client_secret_temp = path
+    logger.info(
+        "OAuth-Client aus GOOGLE_OAUTH_CLIENT_SECRET_JSON (temp-Datei)"
+    )
+    return path
+
 
 class EmailHandler:
     def __init__(self) -> None:
@@ -42,34 +108,56 @@ class EmailHandler:
         self.user_email = GMAIL_ADDRESS
 
     def authenticate(self) -> None:
-        """OAuth2; öffnet ggf. Browser für erste Anmeldung."""
+        """OAuth2; öffnet ggf. Browser für erste Anmeldung (nur lokal)."""
         creds: Optional[UserCredentials] = None
 
-        if os.path.exists(GOOGLE_TOKEN_FILE):
-            creds = UserCredentials.from_authorized_user_file(GOOGLE_TOKEN_FILE, SCOPES)
+        token_path = _ensure_token_file()
+        if token_path:
+            creds = UserCredentials.from_authorized_user_file(token_path, SCOPES)
 
+        need_persist = False
         if not creds or not creds.valid:
+            need_persist = True
             if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
+                try:
+                    creds.refresh(Request())
+                except Exception as exc:
+                    logger.warning(
+                        "Gmail access token refresh fehlgeschlagen: %s", exc
+                    )
+                    creds = None
+            if not creds or not creds.valid:
+                client_path = _ensure_client_secret_file()
+                if not client_path:
                     raise FileNotFoundError(
-                        f"OAuth-Client fehlt: {GOOGLE_CREDENTIALS_FILE}"
+                        "Gmail: Weder gültiges token (Datei/GOOGLE_TOKEN_JSON) noch "
+                        "OAuth-Client (Datei/GOOGLE_OAUTH_CLIENT_SECRET_JSON). "
+                        "Railway: beide Variablen als Secrets setzen oder Dateien mounten."
                     )
                 if (os.getenv("RAILWAY_ENVIRONMENT") or "").strip():
                     raise RuntimeError(
-                        "Gmail OAuth: Auf Railway ist kein Browser-Login möglich. "
-                        "Lokal einmal anmelden (token.json erzeugen) und diese Datei "
-                        "sowie ggf. client_secret.json als Railway Secret/Volume einbinden. "
-                        "Oder nur token.json mounten, wenn Refresh noch gültig ist."
+                        "Gmail auf Railway: Kein gültiges Token oder Refresh fehlgeschlagen — "
+                        "kein Browser-Login möglich. Lokal einmal OAuth, dann kompletten Inhalt "
+                        "von token.json als Secret GOOGLE_TOKEN_JSON eintragen (oder Datei mounten). "
+                        "Wenn Google Refresh verweigert, zusätzlich "
+                        "GOOGLE_OAUTH_CLIENT_SECRET_JSON (Desktop-Client-JSON) setzen."
                     )
                 flow = InstalledAppFlow.from_client_secrets_file(
-                    GOOGLE_CREDENTIALS_FILE, SCOPES
+                    client_path, SCOPES
                 )
                 creds = flow.run_local_server(port=0)
 
-            with open(GOOGLE_TOKEN_FILE, "w", encoding="utf-8") as token:
-                token.write(creds.to_json())
+        if need_persist and creds and creds.valid:
+            try:
+                Path(GOOGLE_TOKEN_FILE).parent.mkdir(parents=True, exist_ok=True)
+                with open(GOOGLE_TOKEN_FILE, "w", encoding="utf-8") as token:
+                    token.write(creds.to_json())
+            except OSError as oe:
+                logger.warning(
+                    "Konnte token nicht nach %s schreiben (OK bei reinem GOOGLE_TOKEN_JSON): %s",
+                    GOOGLE_TOKEN_FILE,
+                    oe,
+                )
 
         self.service = build("gmail", "v1", credentials=creds)
         logger.info("Gmail authentifiziert")

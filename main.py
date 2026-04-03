@@ -34,7 +34,7 @@ from config import (
 )
 from database import db
 from deduplication import deduplicator
-from email_handler import email_handler
+from email_handler import email_handler, gmail_oauth_configured
 from google_form_handler import google_form_handler
 from meta_poster import meta_poster
 from scrapers import collect_all_events
@@ -57,13 +57,10 @@ async def _run_email_screening_digest_to_telegram(flow_name: str) -> int:
     """
     if not EMAIL_SCREENING_ENABLED:
         return 0
-    if not (
-        os.path.exists(GOOGLE_TOKEN_FILE) or os.path.exists(GOOGLE_CREDENTIALS_FILE)
-    ):
+    if not gmail_oauth_configured():
         logger.info(
-            "📧 Email-Screening übersprungen: weder %s noch %s vorhanden",
-            GOOGLE_TOKEN_FILE,
-            GOOGLE_CREDENTIALS_FILE,
+            "📧 Email-Screening übersprungen: kein Gmail-OAuth "
+            "(token.json / GOOGLE_TOKEN_JSON / client_secret / GOOGLE_OAUTH_CLIENT_SECRET_JSON)"
         )
         return 0
 
@@ -167,12 +164,12 @@ async def run_manual_email_flyer_collect() -> str:
     """
     if not EMAIL_SCREENING_ENABLED:
         return "E-Mail-Screening ist aus (EMAIL_SCREENING_ENABLED=0)."
-    if not (
-        os.path.exists(GOOGLE_TOKEN_FILE) or os.path.exists(GOOGLE_CREDENTIALS_FILE)
-    ):
+    if not gmail_oauth_configured():
         return (
-            "Gmail nicht konfiguriert: Weder token.json noch client_secret.json auf dem Server "
-            "(Railway: als Secrets/Dateien mounten; lokal einmal OAuth, dann token hochladen)."
+            "Gmail nicht konfiguriert. Railway: Secrets setzen — "
+            "GOOGLE_TOKEN_JSON (Inhalt von token.json) und optional "
+            "GOOGLE_OAUTH_CLIENT_SECRET_JSON (Inhalt von client_secret.json) "
+            "oder beide Dateien mounten. Siehe .env.example."
         )
     try:
         db.connect()
@@ -334,9 +331,7 @@ async def process_approved_email_submissions(
 
         logger.info(f"📧 {len(approved_emails)} freigegebene Emails → Claude")
 
-        if os.path.exists(GOOGLE_TOKEN_FILE) or os.path.exists(
-            GOOGLE_CREDENTIALS_FILE
-        ):
+        if gmail_oauth_configured():
             email_handler.authenticate()
 
         did_auto_post = False
