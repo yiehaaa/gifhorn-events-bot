@@ -61,13 +61,44 @@ class TelegramBot:
             await update.message.reply_text(
                 "👋 Gifhorn Events Bot\n"
                 "Mail-Digest: Spam pro Zeile mit ❌ ablehnen, dann „Alle übrigen freigeben“.\n"
-                "Später: KI-Beiträge (21 Uhr per Cron) freigeben.\n"
+                "Neue Mails aus Gmail: täglich ~19 Uhr (Cron) oder Menü „E-Mail-Flyer abrufen“ / /emailabruf.\n"
+                "KI-Beiträge: ~21 Uhr (Cron) freigeben.\n"
                 "Läuft mit: python telegram_bot.py",
             )
             await update.message.reply_text(
                 "📋 Menü — bitte einen Button wählen:",
                 reply_markup=self._menu_keyboard(),
             )
+
+    async def cmd_emailabruf(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Gleiche Pipeline wie ~19-Uhr-Collect: Gmail → Digest → ggf. freigegebene Mails verarbeiten."""
+        if self.disabled or not update.message:
+            return
+        if self.chat_id is not None and update.message.chat_id != self.chat_id:
+            await update.message.reply_text("Nur im Freigabe-Chat.")
+            return
+        await update.message.reply_text(
+            "📧 E-Mail-/Flyer-Abruf gestartet — Ergebnis folgt."
+        )
+        bot = Bot(self.bot_token)
+        chat = self.chat_id
+
+        async def _run_manual_email_collect() -> None:
+            try:
+                from main import run_manual_email_flyer_collect
+
+                msg = await run_manual_email_flyer_collect()
+                await bot.send_message(chat_id=chat, text=msg[:3900])
+            except Exception as exc:
+                logger.exception("Manueller E-Mail-/Flyer-Abruf (/emailabruf)")
+                await bot.send_message(
+                    chat_id=chat,
+                    text=f"❌ E-Mail-/Flyer-Abruf fehlgeschlagen: {exc}"[:3900],
+                )
+
+        asyncio.create_task(_run_manual_email_collect())
 
     async def menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Explizites Menu-Kommando für On-Demand-Revision."""
@@ -94,6 +125,12 @@ class TelegramBot:
                 InlineKeyboardButton(
                     "📝 Erstellte Beiträge zur Revision",
                     callback_data="menu_created_posts",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📧 E-Mail-Flyer abrufen",
+                    callback_data="menu_email_flyer_collect",
                 )
             ],
         ]
@@ -223,14 +260,46 @@ class TelegramBot:
 
     async def _handle_menu_callback(self, data: str, query: Any) -> bool:
         """On-demand Menueaktionen; gibt True zurueck, wenn verarbeitet."""
-        if data not in {"menu_incoming_events", "menu_created_posts"}:
+        if data not in {
+            "menu_incoming_events",
+            "menu_created_posts",
+            "menu_email_flyer_collect",
+        }:
             return False
 
-        if not db.conn:
-            db.connect()
-            db.create_tables()
+        if self.chat_id is not None and query.message and query.message.chat_id != self.chat_id:
+            await query.answer("Nur im konfigurierten Freigabe-Chat.", show_alert=True)
+            return True
+
+        if data != "menu_email_flyer_collect":
+            if not db.conn:
+                db.connect()
+                db.create_tables()
 
         await query.answer()
+
+        if data == "menu_email_flyer_collect":
+            await query.edit_message_text(
+                "📧 E-Mail-/Flyer-Abruf gestartet — Ergebnis folgt als neue Nachricht."
+            )
+            bot = Bot(self.bot_token)
+            chat = self.chat_id
+
+            async def _run_manual_email_collect() -> None:
+                try:
+                    from main import run_manual_email_flyer_collect
+
+                    msg = await run_manual_email_flyer_collect()
+                    await bot.send_message(chat_id=chat, text=msg[:3900])
+                except Exception as exc:
+                    logger.exception("Manueller E-Mail-/Flyer-Abruf (Menü)")
+                    await bot.send_message(
+                        chat_id=chat,
+                        text=f"❌ E-Mail-/Flyer-Abruf fehlgeschlagen: {exc}"[:3900],
+                    )
+
+            asyncio.create_task(_run_manual_email_collect())
+            return True
 
         if data == "menu_incoming_events":
             events = db.get_events_awaiting_telegram()
@@ -783,6 +852,7 @@ class TelegramBot:
             return
         application.add_handler(CommandHandler("start", self.start))
         application.add_handler(CommandHandler("menu", self.menu))
+        application.add_handler(CommandHandler("emailabruf", self.cmd_emailabruf))
         # Kein Regex-Filter: In PTB 21 kann ein zu strenges Pattern Callbacks verwerfen
         # → Telegram zeigt endlos „Lädt…“, weil answer() nie aufgerufen wird.
         application.add_handler(CallbackQueryHandler(self.on_callback))

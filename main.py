@@ -48,6 +48,133 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def _run_email_screening_digest_to_telegram(flow_name: str) -> int:
+    """
+    Gmail (unbearbeitet) → Screening → DB-Zeilen → Telegram-Digest.
+    Voraussetzung: db ist verbunden.
+    Rückgabe: Anzahl Mails, die in den Digest aufgenommen wurden (0 = keiner gesendet).
+    """
+    if not EMAIL_SCREENING_ENABLED or not os.path.exists(GOOGLE_CREDENTIALS_FILE):
+        return 0
+
+    logger.info("📧 Starte Email-Screening…")
+    digest_count = 0
+    try:
+        email_handler.authenticate()
+
+        pending_emails = email_handler.get_pending_email_submissions()
+        logger.info("📧 %s unbearbeitete Emails aus Gmail", len(pending_emails))
+
+        if not pending_emails or not email_screener:
+            return 0
+
+        db_patterns = db.get_email_sender_whitelist_patterns()
+        merged = list(dict.fromkeys(EMAIL_SENDER_PATTERNS + db_patterns))
+        active_screener = EmailScreener(
+            sender_patterns=merged,
+            keywords=EMAIL_KEYWORDS,
+            require_attachments=EMAIL_REQUIRE_ATTACHMENTS,
+            min_attachment_size=EMAIL_MIN_ATTACHMENT_SIZE,
+            max_attachment_size=EMAIL_MAX_ATTACHMENT_SIZE,
+        )
+        screened_emails = active_screener.filter_submissions(pending_emails)
+        logger.info("📧 Nach Screening: %s relevante Emails", len(screened_emails))
+
+        if not screened_emails:
+            return 0
+
+        ingest_batch_hex = uuid.uuid4().hex
+        emails_for_telegram: List[Dict[str, Any]] = []
+        for email in screened_emails:
+            row_id = db.add_email_submission(
+                gmail_message_id=email.get("id"),
+                sender_email=email.get("sender", "unknown"),
+                subject=email.get("subject", ""),
+                body_text=email.get("body", ""),
+                attachment_urls={},
+                screening_score=email.get("screening_score", 0),
+                matched_filters=email.get("matched_filters", {}),
+                ingest_batch_id=ingest_batch_hex,
+            )
+            if row_id is not None:
+                payload = dict(email)
+                payload["db_submission_id"] = row_id
+                emails_for_telegram.append(payload)
+
+        if emails_for_telegram and not getattr(telegram_bot, "disabled", False):
+            await telegram_bot.send_daily_email_digest(
+                emails_for_telegram, ingest_batch_hex
+            )
+        digest_count = len(emails_for_telegram)
+        logger.info(
+            "📧 %s Mails im Digest (von %s gescreent, batch=%s…)",
+            digest_count,
+            len(screened_emails),
+            ingest_batch_hex[:8],
+        )
+
+    except Exception as e:
+        logger.warning("❌ Email-Screening Fehler: %s", e)
+        try:
+            db.log_message(
+                "WARNING",
+                f"Email-Screening Fehler: {e}",
+                {"flow": flow_name},
+            )
+        except Exception:
+            pass
+
+    return digest_count
+
+
+async def run_manual_email_flyer_collect() -> str:
+    """
+    Nur E-Mail-/Flyer-Pipeline wie im 19-Uhr-Collect (ohne Portal-Scraper, ohne neue Portal-Events).
+    Verarbeitet danach wie üblich bereits freigegebene Mails (KI → Event).
+    """
+    if not EMAIL_SCREENING_ENABLED:
+        return "E-Mail-Screening ist aus (EMAIL_SCREENING_ENABLED=0)."
+    if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
+        return (
+            "Google-OAuth fehlt auf dem Server (Datei für GOOGLE_CREDENTIALS_FILE / client_secret.json)."
+        )
+    try:
+        db.connect()
+        db.create_tables()
+
+        try:
+            purged = db.purge_rejected_stale(days=REJECTED_RETENTION_DAYS)
+            if purged["events_deleted"] or purged["email_submissions_deleted"]:
+                logger.info(
+                    "Alte abgelehnte Einträge gelöscht (≥%s Tage): %s",
+                    REJECTED_RETENTION_DAYS,
+                    purged,
+                )
+        except Exception as e:
+            logger.warning("purge_rejected_stale: %s", e)
+
+        n = await _run_email_screening_digest_to_telegram(
+            flow_name="run_manual_email_flyer_collect"
+        )
+        await process_approved_email_submissions()
+
+        if n > 0:
+            return (
+                f"✅ E-Mail-/Flyer-Abruf: Digest mit {n} Mail(s) an Telegram gesendet "
+                "(wie 19-Uhr-Lauf). Bereits freigegebene Mails wurden nachverarbeitet."
+            )
+        return (
+            "✅ Abruf fertig: keine neuen relevanten Mails für einen Digest "
+            "(ungelesen in Gmail, aber Screening/DB). "
+            "Freigegebene Mails wurden ggf. nachverarbeitet."
+        )
+    except Exception as e:
+        logger.exception("run_manual_email_flyer_collect")
+        return f"❌ Fehler: {e}"
+    finally:
+        db.close()
+
+
 async def collect_and_approve_flow() -> None:
     """Neue Events sammeln, deduplizieren, speichern, Telegram-Batch senden."""
     logger.info("🚀 Starte Event-Sammlung …")
@@ -81,68 +208,9 @@ async def collect_and_approve_flow() -> None:
         if SCRAPERS_ENABLED:
             all_events = collect_all_events()
 
-        # ==================== EMAIL SCREENING ====================
-        if EMAIL_SCREENING_ENABLED and os.path.exists(GOOGLE_CREDENTIALS_FILE):
-            logger.info("📧 Starte Email-Screening…")
-            try:
-                email_handler.authenticate()
-
-                # 1. Hole unverarbeitete Emails
-                pending_emails = email_handler.get_pending_email_submissions()
-                logger.info(f"📧 {len(pending_emails)} unverarbeitete Emails gefunden")
-
-                if pending_emails and email_screener:
-                    # 2. .env-Patterns + DB-Whitelist (email_sender_whitelist) zusammenführen
-                    db_patterns = db.get_email_sender_whitelist_patterns()
-                    merged = list(dict.fromkeys(EMAIL_SENDER_PATTERNS + db_patterns))
-                    active_screener = EmailScreener(
-                        sender_patterns=merged,
-                        keywords=EMAIL_KEYWORDS,
-                        require_attachments=EMAIL_REQUIRE_ATTACHMENTS,
-                        min_attachment_size=EMAIL_MIN_ATTACHMENT_SIZE,
-                        max_attachment_size=EMAIL_MAX_ATTACHMENT_SIZE,
-                    )
-                    screened_emails = active_screener.filter_submissions(pending_emails)
-                    logger.info(f"📧 Nach Screening: {len(screened_emails)} relevante Emails")
-
-                    if screened_emails:
-                        # 3. Eine Tages-Batch-ID für „alle auf einmal“ in Telegram
-                        ingest_batch_hex = uuid.uuid4().hex
-                        emails_for_telegram: List[Dict[str, Any]] = []
-                        for email in screened_emails:
-                            row_id = db.add_email_submission(
-                                gmail_message_id=email.get("id"),
-                                sender_email=email.get("sender", "unknown"),
-                                subject=email.get("subject", ""),
-                                body_text=email.get("body", ""),
-                                attachment_urls={},
-                                screening_score=email.get("screening_score", 0),
-                                matched_filters=email.get("matched_filters", {}),
-                                ingest_batch_id=ingest_batch_hex,
-                            )
-                            if row_id is not None:
-                                payload = dict(email)
-                                payload["db_submission_id"] = row_id
-                                emails_for_telegram.append(payload)
-
-                        # 4. Genau eine Telegram-Nachricht mit Mail-Übersicht + Batch-Buttons
-                        # (auch bei MOCK_MODE: Freigabe per Telegram; Meta bleibt separat gemockt.)
-                        if emails_for_telegram and not getattr(
-                            telegram_bot, "disabled", False
-                        ):
-                            await telegram_bot.send_daily_email_digest(
-                                emails_for_telegram, ingest_batch_hex
-                            )
-                        logger.info(
-                            "📧 %s Mails im Digest (von %s gescreent, batch=%s…)",
-                            len(emails_for_telegram),
-                            len(screened_emails),
-                            ingest_batch_hex[:8],
-                        )
-
-            except Exception as e:
-                logger.warning(f"❌ Email-Screening Fehler: {e}")
-                db.log_message("WARNING", f"Email-Screening Fehler: {e}", {"flow": "collect_and_approve_flow"})
+        await _run_email_screening_digest_to_telegram(
+            flow_name="collect_and_approve_flow"
+        )
 
         # ==================== STANDARD EVENT-SAMMLUNG ====================
         unique_events = deduplicator.deduplicate_list(all_events)
