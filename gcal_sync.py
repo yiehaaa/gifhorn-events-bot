@@ -9,6 +9,7 @@ wird geloggt und einfach nichts synced.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -38,8 +39,6 @@ class GCalSync:
         try:
             # Token wiederverwenden, wenn möglich
             try:
-                import os
-
                 if os.path.exists(GOOGLE_TOKEN_FILE):
                     creds = UserCredentials.from_authorized_user_file(
                         GOOGLE_TOKEN_FILE, SCOPES
@@ -51,7 +50,16 @@ class GCalSync:
                 if creds and creds.expired and creds.refresh_token:
                     creds.refresh(Request())
                 else:
-                    # Desktop/Auth Flow
+                    if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
+                        logger.warning(
+                            "GCal: Datei fehlt (%s) — Sync übersprungen. Railway: "
+                            "OAuth-JSON deployen/mounten oder gültiges %s mit Refresh-Token.",
+                            GOOGLE_CREDENTIALS_FILE,
+                            GOOGLE_TOKEN_FILE,
+                        )
+                        self.service = None
+                        return
+                    # Desktop/Auth Flow (lokal); auf Server ohne Browser meist ungeeignet
                     flow = InstalledAppFlow.from_client_secrets_file(
                         GOOGLE_CREDENTIALS_FILE, SCOPES
                     )

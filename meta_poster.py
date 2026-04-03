@@ -17,6 +17,7 @@ from config import (
     META_FB_PAGE_ID,
     META_IG_ACCOUNT_ID,
     MOCK_MODE,
+    public_image_url,
 )
 from database import db
 
@@ -31,6 +32,11 @@ class MetaPoster:
         self.fb_page_id = META_FB_PAGE_ID
         self.api_version = META_API_VERSION
         self.graph_base = f"https://graph.facebook.com/{self.api_version}"
+
+    @staticmethod
+    def _image_url_for_api(event: Dict[str, Any]) -> str:
+        """DB kann /flyers/… speichern — Meta braucht absolute https-URL (PUBLIC_IMAGE_BASE_URL)."""
+        return public_image_url(str(event.get("image_url") or "").strip())
 
     def post_to_instagram(self, event: Dict[str, Any]) -> Dict[str, Any]:
         """Instagram: Container + media_publish (Business/Creator API)."""
@@ -47,11 +53,19 @@ class MetaPoster:
                 return {"success": False, "reason": "META_IG_ACCOUNT_ID fehlt"}
 
             post_text = event.get("post_text", "") or ""
-            image_url = event.get("image_url", "") or ""
+            image_url = self._image_url_for_api(event)
 
             if not image_url:
                 logger.warning("Kein Bild für: %s", event.get("title", ""))
                 return {"success": False, "reason": "No image"}
+            if not image_url.startswith(("http://", "https://")):
+                logger.warning(
+                    "Instagram: Bild-URL nicht öffentlich (%r). Worker: PUBLIC_IMAGE_BASE_URL "
+                    "auf die Dashboard-Basis setzen (siehe config.py). Event: %s",
+                    image_url[:200],
+                    event.get("title", ""),
+                )
+                return {"success": False, "reason": "image_url not absolute URL"}
 
             container_url = f"{self.graph_base}/{self.ig_account_id}/media"
             container_data = {
@@ -108,7 +122,7 @@ class MetaPoster:
                 return {"success": False, "reason": "META_FB_PAGE_ID fehlt"}
 
             post_text = event.get("post_text", "") or ""
-            image_url = event.get("image_url", "") or ""
+            image_url = self._image_url_for_api(event)
 
             fb_url = f"{self.graph_base}/{self.fb_page_id}/feed"
             fb_data: Dict[str, Any] = {
@@ -118,7 +132,14 @@ class MetaPoster:
             if event.get("url"):
                 fb_data["link"] = event["url"]
             if image_url:
-                fb_data["picture"] = image_url
+                if not image_url.startswith(("http://", "https://")):
+                    logger.warning(
+                        "Facebook: picture ist keine gültige URL (%r). PUBLIC_IMAGE_BASE_URL prüfen. %s",
+                        image_url[:200],
+                        event.get("title", ""),
+                    )
+                else:
+                    fb_data["picture"] = image_url
 
             response = requests.post(fb_url, data=fb_data, timeout=60)
             result = response.json()
