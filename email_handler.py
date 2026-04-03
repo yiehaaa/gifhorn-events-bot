@@ -23,6 +23,7 @@ from config import (
     EMAIL_ATTACHMENT_STORAGE_PATH,
     FORM_URL,
     GMAIL_ADDRESS,
+    GMAIL_PENDING_QUERY,
     GOOGLE_CREDENTIALS_FILE,
     GOOGLE_TOKEN_FILE,
 )
@@ -54,6 +55,13 @@ class EmailHandler:
                 if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
                     raise FileNotFoundError(
                         f"OAuth-Client fehlt: {GOOGLE_CREDENTIALS_FILE}"
+                    )
+                if (os.getenv("RAILWAY_ENVIRONMENT") or "").strip():
+                    raise RuntimeError(
+                        "Gmail OAuth: Auf Railway ist kein Browser-Login möglich. "
+                        "Lokal einmal anmelden (token.json erzeugen) und diese Datei "
+                        "sowie ggf. client_secret.json als Railway Secret/Volume einbinden. "
+                        "Oder nur token.json mounten, wenn Refresh noch gültig ist."
                     )
                 flow = InstalledAppFlow.from_client_secrets_file(
                     GOOGLE_CREDENTIALS_FILE, SCOPES
@@ -172,7 +180,7 @@ class EmailHandler:
             logger.error("Send-Fehler: %s", error)
 
     def get_pending_email_submissions(
-        self, query: str = "is:unread label:INBOX"
+        self, query: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Hole unbearbeitete Event-Einreichungs-Emails aus Gmail.
@@ -188,12 +196,14 @@ class EmailHandler:
         if not self.service:
             raise RuntimeError("authenticate() zuerst aufrufen")
 
+        q = query if query is not None else GMAIL_PENDING_QUERY
+
         try:
             # 1. Hole Message-IDs
             results = (
                 self.service.users()
                 .messages()
-                .list(userId="me", q=query, maxResults=20)
+                .list(userId="me", q=q, maxResults=20)
                 .execute()
             )
             message_ids = [m["id"] for m in results.get("messages", [])]
@@ -215,6 +225,18 @@ class EmailHandler:
             logger.error(f"Email-Abruf Fehler: {error}")
             return []
 
+    @staticmethod
+    def _walk_payload_parts(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Flacht multipart/* rekursiv (Flyer oft in verschachtelten parts)."""
+        out: List[Dict[str, Any]] = []
+        stack = [payload]
+        while stack:
+            node = stack.pop()
+            for p in node.get("parts") or []:
+                stack.append(p)
+            out.append(node)
+        return out
+
     def _get_attachments_info(self, message_id: str) -> List[Dict[str, Any]]:
         """
         Extrahiere Anhang-Metadaten aus einer Email (ohne Download).
@@ -233,21 +255,29 @@ class EmailHandler:
                 .execute()
             )
 
-            attachments = []
-            parts = message["payload"].get("parts", [])
-
-            for part in parts:
-                if part.get("filename"):
-                    # Das ist eine Datei
-                    headers = {h["name"]: h["value"] for h in part.get("headers", [])}
-                    attachments.append(
-                        {
-                            "filename": part["filename"],
-                            "mime_type": part.get("mimeType", "application/octet-stream"),
-                            "size": int(part.get("body", {}).get("size", 0)),
-                            "attachment_id": part["body"].get("attachmentId", ""),
-                        }
-                    )
+            attachments: List[Dict[str, Any]] = []
+            seen: set[tuple[str, str]] = set()
+            root = message.get("payload") or {}
+            for part in self._walk_payload_parts(root):
+                fn = (part.get("filename") or "").strip()
+                if not fn:
+                    continue
+                body = part.get("body") or {}
+                att_id = body.get("attachmentId") or ""
+                if not att_id:
+                    continue
+                key = (fn, att_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                attachments.append(
+                    {
+                        "filename": fn,
+                        "mime_type": part.get("mimeType", "application/octet-stream"),
+                        "size": int(body.get("size", 0)),
+                        "attachment_id": att_id,
+                    }
+                )
 
             return attachments
         except HttpError as error:

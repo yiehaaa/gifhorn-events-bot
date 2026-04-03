@@ -93,6 +93,12 @@ if not MOCK_MODE and not WEB_DASHBOARD_ONLY:
 GOOGLE_CREDENTIALS_FILE: str = os.getenv("GOOGLE_CREDENTIALS_FILE", "client_secret.json")
 GOOGLE_TOKEN_FILE: str = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
 GMAIL_ADDRESS: Optional[str] = os.getenv("GMAIL_ADDRESS")  # Bot's Gmail Adresse
+# Gmail-Suche für Einreichungen (Screening / Digest). z. B. nur INBOX, oder Label:
+# GMAIL_PENDING_QUERY=label:veranstaltungen is:unread
+GMAIL_PENDING_QUERY: str = (
+    (os.getenv("GMAIL_PENDING_QUERY") or "is:unread label:INBOX").strip()
+    or "is:unread label:INBOX"
+)
 
 # Google Forms + Sheets für Event-Datenerfassung
 # Polling: einmal täglich (19:00 mit collect_and_approve_flow)

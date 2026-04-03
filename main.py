@@ -25,6 +25,7 @@ from config import (
     EMAIL_SENDER_PATTERNS,
     GOOGLE_CREDENTIALS_FILE,
     GOOGLE_FORM_SPREADSHEET_ID,
+    GOOGLE_TOKEN_FILE,
     MOCK_MODE,
     REJECTED_RETENTION_DAYS,
     SCRAPERS_ENABLED,
@@ -54,7 +55,16 @@ async def _run_email_screening_digest_to_telegram(flow_name: str) -> int:
     Voraussetzung: db ist verbunden.
     Rückgabe: Anzahl Mails, die in den Digest aufgenommen wurden (0 = keiner gesendet).
     """
-    if not EMAIL_SCREENING_ENABLED or not os.path.exists(GOOGLE_CREDENTIALS_FILE):
+    if not EMAIL_SCREENING_ENABLED:
+        return 0
+    if not (
+        os.path.exists(GOOGLE_TOKEN_FILE) or os.path.exists(GOOGLE_CREDENTIALS_FILE)
+    ):
+        logger.info(
+            "📧 Email-Screening übersprungen: weder %s noch %s vorhanden",
+            GOOGLE_TOKEN_FILE,
+            GOOGLE_CREDENTIALS_FILE,
+        )
         return 0
 
     logger.info("📧 Starte Email-Screening…")
@@ -134,9 +144,12 @@ async def run_manual_email_flyer_collect() -> str:
     """
     if not EMAIL_SCREENING_ENABLED:
         return "E-Mail-Screening ist aus (EMAIL_SCREENING_ENABLED=0)."
-    if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
+    if not (
+        os.path.exists(GOOGLE_TOKEN_FILE) or os.path.exists(GOOGLE_CREDENTIALS_FILE)
+    ):
         return (
-            "Google-OAuth fehlt auf dem Server (Datei für GOOGLE_CREDENTIALS_FILE / client_secret.json)."
+            "Gmail nicht konfiguriert: Weder token.json noch client_secret.json auf dem Server "
+            "(Railway: als Secrets/Dateien mounten; lokal einmal OAuth, dann token hochladen)."
         )
     try:
         db.connect()
@@ -275,7 +288,9 @@ async def process_approved_email_submissions() -> None:
 
         logger.info(f"📧 {len(approved_emails)} freigegebene Emails → Claude")
 
-        if os.path.exists(GOOGLE_CREDENTIALS_FILE):
+        if os.path.exists(GOOGLE_TOKEN_FILE) or os.path.exists(
+            GOOGLE_CREDENTIALS_FILE
+        ):
             email_handler.authenticate()
 
         did_auto_post = False
