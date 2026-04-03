@@ -46,6 +46,7 @@ from config import (
     REJECTED_RETENTION_DAYS,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
+    WEB_DASHBOARD_ONLY,
 )
 from database import db
 from dm_handler import create_dm_router
@@ -73,6 +74,12 @@ VALID_FILTERS: List[str] = [
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Kein DB-Connect beim Start — sonst stürzt Uvicorn ab, wenn Postgres nicht läuft (-102 im Browser)."""
+    logger.info(
+        "Uvicorn start: WEB_DASHBOARD_ONLY=%s MOCK_MODE=%s service=%r",
+        WEB_DASHBOARD_ONLY,
+        MOCK_MODE,
+        (os.getenv("RAILWAY_SERVICE_NAME") or ""),
+    )
     yield
     db.close()
 

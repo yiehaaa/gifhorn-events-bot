@@ -20,16 +20,22 @@ def _process_is_web_dashboard_only() -> bool:
     Railway: gifhorn-dashboard (Uvicorn) braucht oft nur DATABASE_URL + DASHBOARD_PASSWORD.
     Globale assert TELEGRAM/META wuerden den Import killen → 502 „Application failed to respond“.
 
-    Setze DASHBOARD_ONLY=1 lokal, wenn du ohne Bot-Keys testest (ohne MOCK_MODE).
+    Setze DASHBOARD_ONLY=1 explizit, wenn der Service-Name nicht erkannt wird.
     """
     if os.getenv("DASHBOARD_ONLY", "").strip().lower() in ("1", "true", "yes"):
         return True
     svc = (os.getenv("RAILWAY_SERVICE_NAME") or "").lower()
-    if not svc:
-        return False
+    # Worker / Telegram nie als „nur Dashboard“ behandeln (auch bei leerem Service-Namen nicht raten).
     if "telegram" in svc or "worker" in svc:
         return False
-    return "dashboard" in svc
+    if "dashboard" in svc:
+        return True
+    # Service heißt z. B. anders, aber typisches Railway-Dashboard-Setup: Passwort gesetzt, kein Bot-Token.
+    if (os.getenv("RAILWAY_ENVIRONMENT") or "").strip():
+        if (os.getenv("DASHBOARD_PASSWORD") or "").strip():
+            if not (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip():
+                return True
+    return False
 
 
 # ==================== MODE ====================
