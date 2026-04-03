@@ -11,7 +11,7 @@ import os
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
@@ -36,9 +36,21 @@ logger = logging.getLogger(__name__)
 class TelegramBot:
     def __init__(self) -> None:
         # MOCK_MODE blockiert Meta/Claude-Pflichtkeys, nicht den Telegram-Freigabe-Chat.
-        self.disabled = (not TELEGRAM_BOT_TOKEN) or (not TELEGRAM_CHAT_ID)
-        self.bot_token = TELEGRAM_BOT_TOKEN
-        self.chat_id = int(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else None
+        tok = (TELEGRAM_BOT_TOKEN or "").strip()
+        cid_raw = (TELEGRAM_CHAT_ID or "").strip()
+        self.bot_token: Optional[str] = tok or None
+        self.chat_id: Optional[int] = None
+        self.disabled = (not self.bot_token) or (not cid_raw)
+        if not self.disabled:
+            try:
+                self.chat_id = int(cid_raw)
+            except ValueError:
+                logger.error(
+                    "TELEGRAM_CHAT_ID ist keine Ganzzahl (nach strip): %r — Telegram deaktiviert.",
+                    cid_raw[:48],
+                )
+                self.disabled = True
+                self.chat_id = None
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if self.disabled:
@@ -145,7 +157,7 @@ class TelegramBot:
         if not REFRESH_FLYER_SECRET:
             return event
         src = (event.get("source") or "").strip()
-        if src not in ("web_form", "web"):
+        if src not in ("web_form", "web", "web_submit"):
             return event
         auto = event.get("flyer_auto_generated")
         if auto is False or auto == 0:
@@ -511,7 +523,7 @@ class TelegramBot:
             return
 
         for event in events:
-            if not event.get("post_text"):
+            if not str(event.get("post_text") or "").strip():
                 event["post_text"] = claude_handler.generate_post_text(event)
 
         lines: List[str] = ["🎪 Neue Events zur Freigabe", ""]
@@ -523,7 +535,11 @@ class TelegramBot:
             city = event.get("city", "N/A")
             ed = event.get("event_date", "N/A")
             preview = str(event.get("post_text", ""))[:150]
-            eid = event["id"]
+            try:
+                eid = int(event["id"])
+            except (TypeError, ValueError) as exc:
+                logger.error("Event ohne gültige id: %s", exc)
+                continue
             price_label = self._format_price_label(event)
 
             lines.append(title)
@@ -547,16 +563,28 @@ class TelegramBot:
                 ]
             )
 
+        if not keyboard:
+            logger.error("send_events_for_approval: Batch ohne gültige Event-IDs")
+            return
+
         message_text = "\n".join(lines)
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        bot = Bot(self.bot_token)
-        await bot.send_message(
-            chat_id=self.chat_id,
-            text=message_text,
-            reply_markup=reply_markup,
-        )
-        logger.info("%s Events zur Freigabe gesendet", len(events[:10]))
+        try:
+            # PTB 20+: expliziter Kontext stellt HTTP-Client korrekt ein (sonst sporadisch leere Fehler).
+            async with Bot(self.bot_token) as bot:
+                await bot.send_message(
+                    chat_id=self.chat_id,
+                    text=message_text,
+                    reply_markup=reply_markup,
+                )
+            logger.info("%s Events zur Freigabe gesendet", len(events[:10]))
+        except TelegramError as exc:
+            logger.error(
+                "Telegram send_events_for_approval fehlgeschlagen: %s (chat_id=%s)",
+                exc,
+                self.chat_id,
+            )
 
     async def on_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """

@@ -43,6 +43,7 @@ from config import (
     POSTING_TIMEZONE,
     PUBLIC_IMAGE_BASE_URL,
     REFRESH_FLYER_SECRET,
+    REJECTED_RETENTION_DAYS,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
 )
@@ -50,6 +51,7 @@ from database import db
 from dm_handler import create_dm_router
 from web.email_approval_dashboard import router as email_router
 from meta_poster import meta_poster
+from telegram_bot import telegram_bot
 from web.flyer_render import render_auto_flyer_png
 
 logger = logging.getLogger(__name__)
@@ -206,7 +208,8 @@ async def refresh_flyer_for_event_id(event_id: int) -> Optional[str]:
     if not row:
         return None
     src = (row.get("source") or "").strip()
-    if src not in ("web_form", "web"):
+    # web_submit = kurzes Dashboard-Formular; gleiche Flyer-Refresh-Logik wie web_form
+    if src not in ("web_form", "web", "web_submit"):
         return None
     auto = row.get("flyer_auto_generated")
     if auto is False or auto == 0:
@@ -394,6 +397,7 @@ async def dashboard(
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "meta_token_set": bool(META_ACCESS_TOKEN),
         "public_image_base_url_set": bool(PUBLIC_IMAGE_BASE_URL),
+        "rejected_retention_days": REJECTED_RETENTION_DAYS,
         "email_screening_enabled": EMAIL_SCREENING_ENABLED,
         "auto_post_after_email": AUTO_POST_AFTER_EMAIL_CONVERSION,
         "auto_approve_email_social": AUTO_APPROVE_SOCIAL_FOR_EMAIL_SUBMISSIONS,
@@ -444,6 +448,7 @@ async def dashboard_snapshot(
                 "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
                 "meta_token_set": bool(META_ACCESS_TOKEN),
                 "public_image_base_url_set": bool(PUBLIC_IMAGE_BASE_URL),
+                "rejected_retention_days": REJECTED_RETENTION_DAYS,
                 "email_screening_enabled": EMAIL_SCREENING_ENABLED,
                 "auto_post_after_email": AUTO_POST_AFTER_EMAIL_CONVERSION,
                 "auto_approve_email_social": AUTO_APPROVE_SOCIAL_FOR_EMAIL_SUBMISSIONS,
@@ -476,6 +481,44 @@ async def action_reject(
 ):
     db.set_telegram_approval(event_id, approved=False)
     return RedirectResponse(url="/", status_code=303)
+
+
+async def _notify_telegram_revision_for_event_id(eid: Optional[int]) -> None:
+    """
+    Nach Formular-/Dashboard-Einreichung: eine Freigabe-Nachricht in Telegram (wie Worker-Ende).
+    Braucht TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID auf dem Dashboard-Service.
+    """
+    if eid is None:
+        return
+    if getattr(telegram_bot, "disabled", False):
+        logger.warning(
+            "Telegram-Freigabe übersprungen: Bot deaktiviert (TELEGRAM_BOT_TOKEN/CHAT_ID leer "
+            "oder CHAT_ID keine Zahl). Railway: Variablen auf gifhorn-dashboard prüfen — "
+            "Whitespace/Zeilenumbruch in den Werten vermeiden."
+        )
+        return
+    try:
+        row = db.get_event_by_id(eid)
+        if not row:
+            logger.warning("Telegram notify: Event id=%s nicht in DB", eid)
+            return
+        if row.get("posted_at"):
+            logger.info(
+                "Telegram notify übersprungen (eid=%s): bereits gepostet posted_at=%s",
+                eid,
+                row.get("posted_at"),
+            )
+            return
+        if row.get("approved_for_social") in (True, 1):
+            logger.info("Telegram notify übersprungen (eid=%s): schon freigegeben", eid)
+            return
+        if row.get("telegram_rejected") in (True, 1):
+            logger.info("Telegram notify übersprungen (eid=%s): abgelehnt", eid)
+            return
+        await telegram_bot.send_events_for_approval([dict(row)])
+        logger.info("Telegram Freigabe-Nachricht gesendet für event id=%s", eid)
+    except Exception:
+        logger.exception("Telegram nach neuer Event-Einreichung fehlgeschlagen (eid=%s)", eid)
 
 
 def _normalize_datetime_local(value: str) -> str:
@@ -538,6 +581,8 @@ async def submit_event(
     if eid is None:
         # Sollte bei unique(source_id) kaum passieren; Redirect trotzdem.
         pass
+    else:
+        await _notify_telegram_revision_for_event_id(eid)
 
     return RedirectResponse(url="/", status_code=303)
 
@@ -809,6 +854,8 @@ async def form_submit(
         )
 
         logger.info(f"Web-Form Event eingereicht: {event['title']} (ID: {eid})")
+
+        await _notify_telegram_revision_for_event_id(eid)
 
         return JSONResponse(
             {"status": "success", "event_id": eid},

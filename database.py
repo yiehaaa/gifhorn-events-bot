@@ -669,6 +669,68 @@ class Database:
             )
         return int(cur.rowcount if cur.rowcount is not None else 0)
 
+    def purge_rejected_stale(self, days: int = 30) -> Dict[str, int]:
+        """
+        Löscht dauerhaft:
+        - Events mit telegram_rejected, noch nie gepostet, updated_at älter als `days`
+        - email_submissions mit approval_status=rejected, updated_at älter als `days`
+        """
+        self._ensure_conn()
+        out = {"events_deleted": 0, "email_submissions_deleted": 0}
+        if days < 1:
+            return out
+
+        if self.mode == "pg":
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM events
+                    WHERE COALESCE(telegram_rejected, FALSE) = TRUE
+                      AND posted_at IS NULL
+                      AND COALESCE(updated_at, created_at)
+                          < NOW() - (%s * INTERVAL '1 day')
+                    """,
+                    (days,),
+                )
+                out["events_deleted"] = int(cur.rowcount or 0)
+                cur.execute(
+                    """
+                    DELETE FROM email_submissions
+                    WHERE approval_status = 'rejected'
+                      AND COALESCE(updated_at, created_at)
+                          < NOW() - (%s * INTERVAL '1 day')
+                    """,
+                    (days,),
+                )
+                out["email_submissions_deleted"] = int(cur.rowcount or 0)
+            self.conn.commit()
+            return out
+
+        mod = f"-{days} days"
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                DELETE FROM events
+                WHERE COALESCE(telegram_rejected, 0) = 1
+                  AND (posted_at IS NULL OR posted_at = '')
+                  AND datetime(COALESCE(updated_at, created_at)) < datetime('now', ?)
+                """,
+                (mod,),
+            )
+            out["events_deleted"] = int(cur.rowcount if cur.rowcount is not None else 0)
+            cur = self.conn.execute(
+                """
+                DELETE FROM email_submissions
+                WHERE approval_status = 'rejected'
+                  AND datetime(COALESCE(updated_at, created_at)) < datetime('now', ?)
+                """,
+                (mod,),
+            )
+            out["email_submissions_deleted"] = int(
+                cur.rowcount if cur.rowcount is not None else 0
+            )
+        return out
+
     def reset_event_for_regeneration(self, event_id: int) -> None:
         """
         Setzt ein Event auf "neu generieren":

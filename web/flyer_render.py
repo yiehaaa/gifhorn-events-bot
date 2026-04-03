@@ -256,10 +256,19 @@ async def render_auto_flyer_png(
             try:
                 async with async_playwright() as p:
                     browser = await p.chromium.launch(args=["--no-sandbox"])
-                    page = await browser.new_page(viewport={"width": 1080, "height": 1350})
-                    await page.goto(tmp_path.resolve().as_uri(), wait_until="networkidle")
-                    await page.screenshot(path=str(generated_path), full_page=False)
-                    await browser.close()
+                    try:
+                        page = await browser.new_page(
+                            viewport={"width": 1080, "height": 1350}
+                        )
+                        # file:// + networkidle haengt oft / timeout → stiller Fallback auf Pillow
+                        await page.goto(
+                            tmp_path.resolve().as_uri(),
+                            wait_until="domcontentloaded",
+                            timeout=90_000,
+                        )
+                        await page.screenshot(path=str(generated_path), full_page=False)
+                    finally:
+                        await browser.close()
                 flyer_url = f"/flyers/{generated_name}"
                 logger.info(
                     "HTML-Flyer generiert: %s (palette=%s)",

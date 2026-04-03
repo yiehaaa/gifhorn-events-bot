@@ -63,8 +63,9 @@ EMAIL_FLYER_USE_CLAUDE_CAPTION: bool = (
 )
 
 # ==================== TELEGRAM ====================
-TELEGRAM_BOT_TOKEN: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID: Optional[str] = os.getenv("TELEGRAM_CHAT_ID")
+# Railway copy/paste: oft Zeilenumbruch/Leerzeichen → Token ungültig; .strip() verhindert das.
+TELEGRAM_BOT_TOKEN: Optional[str] = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip() or None
+TELEGRAM_CHAT_ID: Optional[str] = (os.getenv("TELEGRAM_CHAT_ID") or "").strip() or None
 if not MOCK_MODE and not WEB_DASHBOARD_ONLY:
     assert TELEGRAM_BOT_TOKEN, "TELEGRAM_BOT_TOKEN nicht in .env gesetzt"
     assert TELEGRAM_CHAT_ID, "TELEGRAM_CHAT_ID nicht in .env gesetzt"
@@ -90,6 +91,9 @@ GOOGLE_FORM_URL: str = os.getenv(
     "GOOGLE_FORM_URL",
     "https://docs.google.com/forms/d/FORM_ID/viewform"
 )  # Wird als Bio-Link verwendet
+
+# Abgelehnte Events (Dashboard/Telegram) und abgelehnte E-Mail-Einreichungen nach X Tagen löschen
+REJECTED_RETENTION_DAYS: int = int(os.getenv("REJECTED_RETENTION_DAYS", "30") or "30")
 
 # ==================== EMAIL SCREENING ====================
 EMAIL_SCREENING_ENABLED: bool = os.getenv("EMAIL_SCREENING_ENABLED", "1").strip() == "1"

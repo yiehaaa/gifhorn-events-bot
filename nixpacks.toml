@@ -1,0 +1,6 @@
+# Playwright: `pip install playwright` laedt keine Chromium-Binaries.
+# Ohne diesen Schritt schlaegt HTML-Flyer fehl → stiller Pillow-Fallback (anderes „Bild“).
+[phases.install]
+cmds = [
+  "python -m venv --copies /opt/venv && . /opt/venv/bin/activate && pip install -r requirements.txt && python -m playwright install --with-deps chromium"
+]

@@ -26,6 +26,7 @@ from config import (
     GOOGLE_CREDENTIALS_FILE,
     GOOGLE_FORM_SPREADSHEET_ID,
     MOCK_MODE,
+    REJECTED_RETENTION_DAYS,
     SCRAPERS_ENABLED,
     email_screener,
     public_image_url,
@@ -57,13 +58,23 @@ async def collect_and_approve_flow() -> None:
         EMAIL_SCREENING_ENABLED,
     )
     if not SCRAPERS_ENABLED:
-        logger.warning(
-            "SCRAPERS_ENABLED=0 — keine Web-Quellen (Kurt, Stadt Gifhorn, Ticketmaster, …). "
-            "Im Railway-Worker setzen: SCRAPERS_ENABLED=1"
+        logger.info(
+            "SCRAPERS_ENABLED=0 — keine Web-Portale; nur Formular/Mail/Dashboard-Pipeline."
         )
     try:
         db.connect()
         db.create_tables()
+
+        try:
+            purged = db.purge_rejected_stale(days=REJECTED_RETENTION_DAYS)
+            if purged["events_deleted"] or purged["email_submissions_deleted"]:
+                logger.info(
+                    "Alte abgelehnte Einträge gelöscht (≥%s Tage): %s",
+                    REJECTED_RETENTION_DAYS,
+                    purged,
+                )
+        except Exception as e:
+            logger.warning("purge_rejected_stale: %s", e)
 
         all_events: List[Dict[str, Any]] = []
         # MOCK_MODE mockt Claude/Meta, blockiert aber nicht die Netzwerk-Scraper.
@@ -466,6 +477,18 @@ async def post_approved_events() -> None:
     logger.info("Starte Meta-Posting …")
     try:
         db.connect()
+        db.create_tables()
+        try:
+            purged = db.purge_rejected_stale(days=REJECTED_RETENTION_DAYS)
+            if purged["events_deleted"] or purged["email_submissions_deleted"]:
+                logger.info(
+                    "Alte abgelehnte Einträge gelöscht (≥%s Tage): %s",
+                    REJECTED_RETENTION_DAYS,
+                    purged,
+                )
+        except Exception as e:
+            logger.warning("purge_rejected_stale: %s", e)
+
         approved = db.get_events_ready_for_meta()
         if not approved:
             logger.info("Keine freigegebenen Events zum Posten")
