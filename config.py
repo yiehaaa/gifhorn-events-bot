@@ -14,10 +14,30 @@ from dotenv import load_dotenv
 # .env relativ zum config.py-Verzeichnis laden – funktioniert unabhängig vom CWD
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
+
+def _process_is_web_dashboard_only() -> bool:
+    """
+    Railway: gifhorn-dashboard (Uvicorn) braucht oft nur DATABASE_URL + DASHBOARD_PASSWORD.
+    Globale assert TELEGRAM/META wuerden den Import killen → 502 „Application failed to respond“.
+
+    Setze DASHBOARD_ONLY=1 lokal, wenn du ohne Bot-Keys testest (ohne MOCK_MODE).
+    """
+    if os.getenv("DASHBOARD_ONLY", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    svc = (os.getenv("RAILWAY_SERVICE_NAME") or "").lower()
+    if not svc:
+        return False
+    if "telegram" in svc or "worker" in svc:
+        return False
+    return "dashboard" in svc
+
+
 # ==================== MODE ====================
 # Wenn `MOCK_MODE=1` ist gesetzt, laufen wir ohne externe API-Keys durch
 # (für lokale Tests, Dashboard-Einreichung und Posting-Simulation).
 MOCK_MODE: bool = os.getenv("MOCK_MODE", "0").strip() == "1"
+
+WEB_DASHBOARD_ONLY: bool = _process_is_web_dashboard_only()
 
 # ==================== DATABASE ====================
 DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL")
@@ -45,7 +65,7 @@ EMAIL_FLYER_USE_CLAUDE_CAPTION: bool = (
 # ==================== TELEGRAM ====================
 TELEGRAM_BOT_TOKEN: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID: Optional[str] = os.getenv("TELEGRAM_CHAT_ID")
-if not MOCK_MODE:
+if not MOCK_MODE and not WEB_DASHBOARD_ONLY:
     assert TELEGRAM_BOT_TOKEN, "TELEGRAM_BOT_TOKEN nicht in .env gesetzt"
     assert TELEGRAM_CHAT_ID, "TELEGRAM_CHAT_ID nicht in .env gesetzt"
 
@@ -54,7 +74,7 @@ META_ACCESS_TOKEN: Optional[str] = os.getenv("META_ACCESS_TOKEN")
 META_IG_ACCOUNT_ID: Optional[str] = os.getenv("META_IG_ACCOUNT_ID")  # Instagram Business Account ID
 META_FB_PAGE_ID: Optional[str] = os.getenv("META_FB_PAGE_ID")  # Facebook Page ID
 META_API_VERSION: str = os.getenv("META_API_VERSION", "v18.0")
-if not MOCK_MODE:
+if not MOCK_MODE and not WEB_DASHBOARD_ONLY:
     assert META_ACCESS_TOKEN, "META_ACCESS_TOKEN nicht in .env gesetzt"
 
 # ==================== GOOGLE (Gmail + Calendar + Forms) ====================
@@ -242,7 +262,8 @@ STADTHALLE_PROGRAM_URL: str = os.getenv(
     "STADTHALLE_PROGRAM_URL", "https://www.stadthalle-gifhorn.de/programm"
 )
 
-# Externe Scraper standardmäßig deaktivieren (damit Tests ohne APIs funktionieren).
+# Web-Portale (Kurt, Stadt Gifhorn, …): für Railway-Worker Produktion SCRAPERS_ENABLED=1 setzen.
+# Default 0 = lokale Tests ohne Netzwerk-Abfragen.
 SCRAPERS_ENABLED: bool = os.getenv("SCRAPERS_ENABLED", "0").strip() == "1"
 
 # ==================== EMAIL SCREENER INITIALISIERUNG ====================

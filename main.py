@@ -50,12 +50,24 @@ logger = logging.getLogger(__name__)
 async def collect_and_approve_flow() -> None:
     """Neue Events sammeln, deduplizieren, speichern, Telegram-Batch senden."""
     logger.info("🚀 Starte Event-Sammlung …")
+    logger.info(
+        "Konfig: SCRAPERS_ENABLED=%s MOCK_MODE=%s EMAIL_SCREENING_ENABLED=%s",
+        SCRAPERS_ENABLED,
+        MOCK_MODE,
+        EMAIL_SCREENING_ENABLED,
+    )
+    if not SCRAPERS_ENABLED:
+        logger.warning(
+            "SCRAPERS_ENABLED=0 — keine Web-Quellen (Kurt, Stadt Gifhorn, Ticketmaster, …). "
+            "Im Railway-Worker setzen: SCRAPERS_ENABLED=1"
+        )
     try:
         db.connect()
         db.create_tables()
 
         all_events: List[Dict[str, Any]] = []
-        if SCRAPERS_ENABLED and not MOCK_MODE:
+        # MOCK_MODE mockt Claude/Meta, blockiert aber nicht die Netzwerk-Scraper.
+        if SCRAPERS_ENABLED:
             all_events = collect_all_events()
 
         # ==================== EMAIL SCREENING ====================
@@ -144,7 +156,8 @@ async def collect_and_approve_flow() -> None:
                 event["id"] = eid
 
         pending = db.get_events_awaiting_telegram()
-        if not MOCK_MODE and not getattr(telegram_bot, "disabled", False):
+        # Wie Mail-Digest: Freigabe-Nachricht auch bei MOCK_MODE (Meta bleibt gemockt).
+        if not getattr(telegram_bot, "disabled", False):
             await telegram_bot.send_events_for_approval(pending)
         logger.info("✅ Event-Sammlung abgeschlossen")
 
