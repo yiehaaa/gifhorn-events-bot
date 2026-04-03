@@ -35,6 +35,11 @@ def _process_is_web_dashboard_only() -> bool:
         if (os.getenv("DASHBOARD_PASSWORD") or "").strip():
             if not (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip():
                 return True
+            # Web-UI darf Telegram haben (Formular → Freigabe-Chat), Meta postet der Worker.
+            # Ohne META_ACCESS_TOKEN ist es sehr wahrscheinlich kein Posting-Worker — sonst schlägt
+            # assert META fehl und Uvicorn startet gar nicht (502 auf allen Routen).
+            if not (os.getenv("META_ACCESS_TOKEN") or "").strip():
+                return True
     return False
 
 
